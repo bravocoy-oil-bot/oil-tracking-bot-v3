@@ -236,3 +236,7 @@ def compute_overview(get_all_rows_fn) -> List[UserSummary]:
     summaries = [compute_user_summary(uid, get_all_rows_fn) for uid in user_ids]
     summaries.sort(key=lambda x: x.user_name.lower())
     return summaries
+
+def get_user_last_records(user_id: str, get_all_rows_fn, limit: int = 5) -> List[LedgerRow]:
+    rows = [r for r in _parse_rows(get_all_rows_fn) if r.user_id == str(user_id)]
+    return rows[-limit:]
