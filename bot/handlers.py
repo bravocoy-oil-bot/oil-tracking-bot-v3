@@ -1,6 +1,3 @@
-from services.ledger import compute_overview, compute_user_summary, get_user_last_records
-from services.sheets_repo import get_all_rows
-
 from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from bot.callbacks import handle_callback
@@ -11,14 +8,17 @@ from bot.conversations import (
     cmd_clockoff,
     cmd_clockphoff,
     cmd_clockspecialoff,
-    cmd_history,
     cmd_newuser,
     cmd_startadmin,
     handle_message,
 )
 from constants import HELP_TEXT, START_TEXT
-from services.sheets_repo import healthcheck, try_get_worksheet_title
-from services.ledger import compute_overview, compute_user_summary
+from services.ledger import compute_overview, compute_user_summary, get_user_last_records
+from services.sheets_repo import (
+    get_all_rows,
+    healthcheck,
+    try_get_worksheet_title,
+)
 
 
 async def cmd_start(update, context):
@@ -46,10 +46,10 @@ async def cmd_sheetinfo(update, context):
     else:
         await update.message.reply_text("Sheet not ready.")
 
+
 async def cmd_summary(update, context):
     uid = str(update.effective_user.id)
     s = compute_user_summary(uid, get_all_rows)
-    recent = get_user_last_records(uid, get_all_rows, limit=5)
 
     lines = [
         "📊 *Your OIL Summary*",
@@ -104,30 +104,41 @@ async def cmd_summary(update, context):
                 f"  ⏳ Expiry: {e.expiry or '—'}"
             )
 
-    def get_off_type(r):
-        kind = (r.holiday_kind or "").strip().lower()
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def cmd_history(update, context):
+    uid = str(update.effective_user.id)
+    recent = get_user_last_records(uid, get_all_rows, limit=10)
+
+    if not recent:
+        await update.message.reply_text("📜 No records found.")
+        return
+
+    def get_off_type(row):
+        kind = (row.holiday_kind or "").strip().lower()
         if kind == "special":
             return "Special"
         if kind in ("yes", "y", "true", "1"):
             return "PH"
         return "Normal"
 
-    if recent:
-        lines.append("")
-        lines.append("*Last 5 Records*")
-        for i, r in enumerate(recent, start=1):
-            is_plus = r.delta >= 0
-            symbol = "🟢" if is_plus else "🔴"
-            operator = "+" if is_plus else "-"
-            amount = abs(r.delta)
-            off_type = get_off_type(r)
+    lines = ["📜 *Your Recent OIL Records*"]
 
-            lines.append(
-                f"{i}) {symbol} {r.action} [{off_type}]\n"
-                f"   {r.current_off:.1f} {operator} {amount:.1f} = {r.final_off:.1f}\n"
-                f"   📅 {r.application_date or r.timestamp[:10]}\n"
-                f"   📝 {r.remarks or '—'}"
-            )
+    for i, r in enumerate(recent, start=1):
+        is_plus = r.delta >= 0
+        symbol = "🟢" if is_plus else "🔴"
+        operator = "+" if is_plus else "-"
+        amount = abs(r.delta)
+        off_type = get_off_type(r)
+
+        lines.append("")
+        lines.append(
+            f"{i}) {symbol} {r.action} [{off_type}]\n"
+            f"   {r.current_off:.1f} {operator} {amount:.1f} = {r.final_off:.1f}\n"
+            f"   📅 {r.application_date or r.timestamp[:10]}\n"
+            f"   📝 {r.remarks or '—'}"
+        )
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
@@ -142,10 +153,11 @@ async def cmd_overview(update, context):
     for s in items:
         blocks.append(
             f"\n{s.user_name}\n"
-            f"Total: {s.total_balance:.1f} | "
-            f"Normal: {s.normal_balance:.1f} | "
-            f"PH: {s.ph_active:.1f} | "
-            f"Special: {s.special_active:.1f}"
+            f"   🔹 Total: {s.total_balance:.1f}\n"
+            f"   🔸 Normal: {s.normal_balance:.1f}\n"
+            f"   🏖 PH: {s.ph_active:.1f}\n"
+            f"   ⭐ Special: {s.special_active:.1f}"
+            + (f"\n   ⚠️ Negative normal balance" if s.normal_balance < 0 else "")
         )
 
     text = "\n".join(blocks)
@@ -161,22 +173,6 @@ async def cmd_overview(update, context):
             await update.message.reply_text(chunk.strip(), parse_mode="Markdown")
             chunk = ""
         chunk += piece
-
-    if chunk.strip():
-        await update.message.reply_text(chunk.strip(), parse_mode="Markdown")
-
-    # Telegram message limit guard
-    if len(text) <= 3800:
-        await update.message.reply_text(text, parse_mode="Markdown")
-        return
-
-    chunk = ""
-    for block in lines:
-        part = block + "\n\n"
-        if len(chunk) + len(part) > 3800:
-            await update.message.reply_text(chunk.strip(), parse_mode="Markdown")
-            chunk = ""
-        chunk += part
 
     if chunk.strip():
         await update.message.reply_text(chunk.strip(), parse_mode="Markdown")
