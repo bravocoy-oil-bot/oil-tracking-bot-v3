@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Dict, List
-
-from services.sheets_repo import get_all_rows
+from typing import List
 
 
 def _safe_float(value) -> float:
@@ -45,21 +43,33 @@ class LedgerRow:
 
 
 @dataclass
+class EntryDetail:
+    date: str
+    qty: float
+    expiry: str
+    remarks: str
+
+
+@dataclass
 class UserSummary:
     user_id: str
     user_name: str
-    total_balance: float
+    total_balance: float          # available total only
     normal_balance: float
     ph_active: float
     ph_expired: float
     special_active: float
     special_expired: float
+    ph_active_entries: List[EntryDetail]
+    ph_expired_entries: List[EntryDetail]
+    special_active_entries: List[EntryDetail]
+    special_expired_entries: List[EntryDetail]
     last_action: str
     last_application_date: str
 
 
-def _parse_rows() -> List[LedgerRow]:
-    rows = get_all_rows()
+def _parse_rows(get_all_rows_fn) -> List[LedgerRow]:
+    rows = get_all_rows_fn()
     if not rows:
         return []
 
@@ -89,10 +99,6 @@ def _parse_rows() -> List[LedgerRow]:
     return parsed
 
 
-def _rows_for_user(user_id: str) -> List[LedgerRow]:
-    return [r for r in _parse_rows() if r.user_id == str(user_id)]
-
-
 def _allocate_remaining(grants: List[dict], claims: List[float]) -> None:
     for claim_qty in claims:
         left = float(claim_qty)
@@ -104,22 +110,32 @@ def _allocate_remaining(grants: List[dict], claims: List[float]) -> None:
             left -= take
 
 
-def _ph_breakdown(rows: List[LedgerRow]) -> tuple[float, float]:
+def _is_ph_row(r: LedgerRow) -> bool:
+    return r.holiday_kind.strip().lower() in ("yes", "y", "true", "1")
+
+
+def _is_special_row(r: LedgerRow) -> bool:
+    return r.holiday_kind.strip().lower() == "special"
+
+
+def _is_normal_row(r: LedgerRow) -> bool:
+    return not _is_ph_row(r) and not _is_special_row(r)
+
+
+def _build_bucket_breakdown(rows: List[LedgerRow]) -> tuple[float, float, List[EntryDetail], List[EntryDetail]]:
     today = date.today()
     grants = []
     claims = []
 
     for r in rows:
-        kind = r.holiday_kind.lower()
-        if kind not in ("yes", "y", "true", "1"):
-            continue
-
         qty = r.delta
         if qty > 0:
             grants.append(
                 {
                     "remaining": float(qty),
+                    "date": r.application_date,
                     "expiry": r.expiry,
+                    "remarks": r.remarks,
                 }
             )
         elif qty < 0:
@@ -127,8 +143,10 @@ def _ph_breakdown(rows: List[LedgerRow]) -> tuple[float, float]:
 
     _allocate_remaining(grants, claims)
 
-    active = 0.0
-    expired = 0.0
+    active_total = 0.0
+    expired_total = 0.0
+    active_entries: List[EntryDetail] = []
+    expired_entries: List[EntryDetail] = []
 
     for g in grants:
         rem = float(g["remaining"])
@@ -136,66 +154,25 @@ def _ph_breakdown(rows: List[LedgerRow]) -> tuple[float, float]:
             continue
 
         exp = _safe_date(g["expiry"])
+        entry = EntryDetail(
+            date=g["date"],
+            qty=rem,
+            expiry=g["expiry"],
+            remarks=g["remarks"],
+        )
+
         if exp and exp < today:
-            expired += rem
+            expired_total += rem
+            expired_entries.append(entry)
         else:
-            active += rem
+            active_total += rem
+            active_entries.append(entry)
 
-    return active, expired
-
-
-def _special_breakdown(rows: List[LedgerRow]) -> tuple[float, float]:
-    today = date.today()
-    grants = []
-    claims = []
-
-    for r in rows:
-        kind = r.holiday_kind.lower()
-        if kind != "special":
-            continue
-
-        qty = r.special_total if r.special_total and r.delta == 0 else r.delta
-        if qty > 0:
-            grants.append(
-                {
-                    "remaining": float(qty if r.delta > 0 else 0.0) if r.delta <= 0 else float(r.delta),
-                    "expiry": r.expiry,
-                }
-            )
-        elif qty < 0:
-            claims.append(abs(float(qty)))
-
-    if not grants:
-        # fallback to delta-based parsing only
-        for r in rows:
-            if r.holiday_kind.lower() != "special":
-                continue
-            if r.delta > 0:
-                grants.append({"remaining": float(r.delta), "expiry": r.expiry})
-            elif r.delta < 0:
-                claims.append(abs(float(r.delta)))
-
-    _allocate_remaining(grants, claims)
-
-    active = 0.0
-    expired = 0.0
-
-    for g in grants:
-        rem = float(g["remaining"])
-        if rem <= 0:
-            continue
-
-        exp = _safe_date(g["expiry"])
-        if exp and exp < today:
-            expired += rem
-        else:
-            active += rem
-
-    return active, expired
+    return active_total, expired_total, active_entries, expired_entries
 
 
-def compute_user_summary(user_id: str) -> UserSummary:
-    rows = _rows_for_user(user_id)
+def compute_user_summary(user_id: str, get_all_rows_fn) -> UserSummary:
+    rows = [r for r in _parse_rows(get_all_rows_fn) if r.user_id == str(user_id)]
 
     if not rows:
         return UserSummary(
@@ -207,17 +184,25 @@ def compute_user_summary(user_id: str) -> UserSummary:
             ph_expired=0.0,
             special_active=0.0,
             special_expired=0.0,
+            ph_active_entries=[],
+            ph_expired_entries=[],
+            special_active_entries=[],
+            special_expired_entries=[],
             last_action="",
             last_application_date="",
         )
 
     last = rows[-1]
-    total_balance = last.final_off
 
-    ph_active, ph_expired = _ph_breakdown(rows)
-    special_active, special_expired = _special_breakdown(rows)
+    normal_balance = sum(r.delta for r in rows if _is_normal_row(r))
 
-    normal_balance = total_balance - ph_active - special_active
+    ph_rows = [r for r in rows if _is_ph_row(r)]
+    ph_active, ph_expired, ph_active_entries, ph_expired_entries = _build_bucket_breakdown(ph_rows)
+
+    special_rows = [r for r in rows if _is_special_row(r)]
+    special_active, special_expired, special_active_entries, special_expired_entries = _build_bucket_breakdown(special_rows)
+
+    total_balance = normal_balance + ph_active + special_active
 
     return UserSummary(
         user_id=last.user_id,
@@ -228,24 +213,26 @@ def compute_user_summary(user_id: str) -> UserSummary:
         ph_expired=ph_expired,
         special_active=special_active,
         special_expired=special_expired,
+        ph_active_entries=ph_active_entries,
+        ph_expired_entries=ph_expired_entries,
+        special_active_entries=special_active_entries,
+        special_expired_entries=special_expired_entries,
         last_action=last.action,
         last_application_date=last.application_date,
     )
 
 
-def compute_overview() -> List[UserSummary]:
-    rows = _parse_rows()
-    user_ids = []
+def compute_overview(get_all_rows_fn) -> List[UserSummary]:
+    rows = _parse_rows(get_all_rows_fn)
     seen = set()
+    user_ids = []
 
     for r in rows:
-        if not r.user_id:
-            continue
-        if r.user_id in seen:
+        if not r.user_id or r.user_id in seen:
             continue
         seen.add(r.user_id)
         user_ids.append(r.user_id)
 
-    summaries = [compute_user_summary(uid) for uid in user_ids]
+    summaries = [compute_user_summary(uid, get_all_rows_fn) for uid in user_ids]
     summaries.sort(key=lambda x: x.user_name.lower())
     return summaries
