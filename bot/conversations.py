@@ -1,6 +1,4 @@
 import logging
-from services.ledger import compute_user_summary
-from services.sheets_repo import get_all_rows
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, Optional
 from uuid import uuid4
@@ -18,6 +16,7 @@ from bot.ui import (
     validate_application_date,
     validate_half_step,
 )
+from services.ledger import compute_user_summary
 from services.runtime_state import pending_payloads, user_state
 from services.sheets_repo import (
     append_row,
@@ -31,35 +30,68 @@ log = logging.getLogger(__name__)
 
 
 def _label_from_action(action: str) -> str:
-    if action == "clockoff":
-        return "Clock Off"
-    if action == "claimoff":
+    if "claim" in action:
         return "Claim Off"
-    if action == "clockphoff":
-        return "Clock PH Off"
-    if action == "claimphoff":
-        return "Claim PH Off"
-    if action == "clockspecialoff":
-        return "Clock Special Off"
-    if action == "claimspecialoff":
-        return "Claim Special Off"
+    if "clock" in action:
+        return "Clock Off"
     return action
+
+
+def _off_type_label(action: str, is_ph: bool = False, is_special: bool = False) -> str:
+    if is_special or action in ("clockspecialoff", "claimspecialoff"):
+        return "Special"
+    if is_ph or action in ("clockphoff", "claimphoff"):
+        return "PH"
+    return "Normal"
+
+
+def _sheet_action_label(action: str) -> str:
+    return "Claim Off" if "claim" in action else "Clock Off"
 
 
 def build_admin_summary_text(payload: dict, approved: bool, approver_name: str, final_off: float | None) -> str:
     status = "✅ Approved" if approved else "❌ Denied"
 
     if payload["type"] == "single":
+        off_type = _off_type_label(
+            payload.get("action", ""),
+            payload.get("is_ph", False),
+            payload.get("is_special", False),
+        )
+
         lines = [
             status,
-            f"{_label_from_action(payload['action'])} — {payload['user_name']} ({payload['user_id']})",
-            f"Days: {payload['days']} | Date: {payload['app_date']}",
+            f"{_label_from_action(payload['action'])} [{off_type}] — {payload['user_name']} ({payload['user_id']})",
+            f"Days: {payload['days']:.1f} | Date: {payload['app_date']}",
             f"Reason: {payload.get('reason', '') or '—'}",
+            "",
+            "Balances Before",
+            f"- Total: {payload.get('current_total', 0.0):.1f}",
+            f"- Normal: {payload.get('current_normal', 0.0):.1f}",
+            f"- PH: {payload.get('current_ph', 0.0):.1f}",
+            f"- Special: {payload.get('current_special', 0.0):.1f}",
+            "",
+            "Balances After",
+            f"- Total: {payload.get('projected_total', 0.0):.1f}",
+            f"- Normal: {payload.get('projected_normal', 0.0):.1f}",
+            f"- PH: {payload.get('projected_ph', 0.0):.1f}",
+            f"- Special: {payload.get('projected_special', 0.0):.1f}",
         ]
+
         if (payload.get("is_ph") or payload.get("is_special")) and payload.get("expiry"):
             lines.append(f"Expiry: {payload['expiry']}")
+
+        if payload.get("warn_negative_normal"):
+            lines.extend([
+                "",
+                "⚠️ Warning",
+                f"Normal OIL will go negative: {payload.get('projected_normal', 0.0):.1f}",
+            ])
+
         if final_off is not None and approved:
-            lines.append(f"Final Off: {final_off:.1f}")
+            lines.append("")
+            lines.append(f"Final Off Row Value: {final_off:.1f}")
+
         lines.append(f"Approved by: {approver_name}")
         return "\n".join(lines)
 
@@ -243,6 +275,44 @@ async def finalize_single_request(update: Update, context: ContextTypes.DEFAULT_
     is_ph = st["is_ph"]
     is_special = st["action"] in ("clockspecialoff", "claimspecialoff")
 
+    summary = compute_user_summary(str(uid), get_all_rows)
+    current_normal = summary.normal_balance
+    current_ph = summary.ph_active
+    current_special = summary.special_active
+
+    projected_normal = current_normal
+    projected_ph = current_ph
+    projected_special = current_special
+
+    if st["action"] == "claimoff":
+        projected_normal = current_normal - days
+    elif st["action"] == "claimphoff":
+        projected_ph = current_ph - days
+    elif st["action"] == "claimspecialoff":
+        projected_special = current_special - days
+    elif st["action"] == "clockoff":
+        projected_normal = current_normal + days
+    elif st["action"] == "clockphoff":
+        projected_ph = current_ph + days
+    elif st["action"] == "clockspecialoff":
+        projected_special = current_special + days
+
+    if st["action"] == "claimphoff" and days > current_ph:
+        await reply_quiet(
+            update,
+            f"❌ You only have {current_ph:.1f} active PH OIL available.\n"
+            f"Requested claim: {days:.1f}",
+        )
+        return
+
+    if st["action"] == "claimspecialoff" and days > current_special:
+        await reply_quiet(
+            update,
+            f"❌ You only have {current_special:.1f} active Special OIL available.\n"
+            f"Requested claim: {days:.1f}",
+        )
+        return
+
     ok, msg = validate_application_date(st["action"], app_date)
     if not ok:
         await reply_quiet(update, msg)
@@ -290,6 +360,15 @@ async def finalize_single_request(update: Update, context: ContextTypes.DEFAULT_
         "ph_total_after": ph_total_after,
         "special_total_after": special_total_after,
         "admin_msgs": [],
+        "current_total": summary.total_balance,
+        "current_normal": current_normal,
+        "current_ph": current_ph,
+        "current_special": current_special,
+        "projected_total": projected_normal + projected_ph + projected_special,
+        "projected_normal": projected_normal,
+        "projected_ph": projected_ph,
+        "projected_special": projected_special,
+        "warn_negative_normal": projected_normal < 0,
     }
 
     try:
@@ -302,26 +381,44 @@ async def finalize_single_request(update: Update, context: ContextTypes.DEFAULT_
         InlineKeyboardButton("❌ Deny", callback_data=f"deny|{key}"),
     ]])
 
-    label = _label_from_action(st["action"])
-    text = (
-        f"🆕 *{label} Request*\n\n"
-        f"👤 User: {user.full_name} ({uid})\n"
-        f"📅 Days: {days}\n"
-        f"🗓 Application Date: {app_date}\n"
-        f"📝 Reason: {st.get('reason', '') or '—'}\n\n"
-        f"📊 Current Off: {current_off:.1f}\n"
-        f"📈 New Balance: {final:.1f}"
-    )
+    off_type = _off_type_label(st["action"], is_ph, is_special)
+    display_action = _label_from_action(st["action"])
+
+    text_lines = [
+        f"🆕 *{display_action} Request [{off_type}]*",
+        "",
+        f"👤 User: {user.full_name} ({uid})",
+        f"📅 Days: {days:.1f}",
+        f"🗓 Application Date: {app_date}",
+        f"📝 Reason: {st.get('reason', '') or '—'}",
+        "",
+        "*Balances Before*",
+        f"- Total: {summary.total_balance:.1f}",
+        f"- Normal: {current_normal:.1f}",
+        f"- PH: {current_ph:.1f}",
+        f"- Special: {current_special:.1f}",
+        "",
+        "*Balances After*",
+        f"- Total: {(projected_normal + projected_ph + projected_special):.1f}",
+        f"- Normal: {projected_normal:.1f}",
+        f"- PH: {projected_ph:.1f}",
+        f"- Special: {projected_special:.1f}",
+    ]
 
     if is_ph and expiry:
-        text += f"\n🏖 PH Expiry: {expiry}"
-        if ph_total_after is not None:
-            text += f"\n🏖 PH Total After: {ph_total_after:.1f}"
+        text_lines.append(f"🏖 PH Expiry: {expiry}")
 
     if is_special and expiry:
-        text += f"\n⭐ Special Expiry: {expiry}"
-        if special_total_after is not None:
-            text += f"\n⭐ Special Total After: {special_total_after:.1f}"
+        text_lines.append(f"⭐ Special Expiry: {expiry}")
+
+    if projected_normal < 0 and st["action"] == "claimoff":
+        text_lines.extend([
+            "",
+            "⚠️ *Warning*",
+            f"Normal OIL will go negative after approval: {projected_normal:.1f}",
+        ])
+
+    text = "\n".join(text_lines)
 
     sent_any = False
     admin_msgs = []
@@ -457,7 +554,7 @@ async def handle_single_apply(update: Update, context: ContextTypes.DEFAULT_TYPE
     append_row(
         user_id=uid,
         user_name=uname,
-        action=_label_from_action(action),
+        action=_sheet_action_label(action),
         current_off=current,
         add_subtract=add,
         final_off=final,
@@ -579,7 +676,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         st["days"] = days
         st["stage"] = "awaiting_app_date"
         st["min_date"] = date.today() - timedelta(days=365)
-        st["max_date"] = date.today() + (timedelta(days=365) if st["action"] in ("claimoff", "claimphoff", "claimspecialoff") else timedelta(days=0))
+        st["max_date"] = date.today() + (
+            timedelta(days=365) if st["action"] in ("claimoff", "claimphoff", "claimspecialoff") else timedelta(days=0)
+        )
 
         await reply_quiet(
             update,
