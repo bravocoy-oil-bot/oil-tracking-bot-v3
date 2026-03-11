@@ -89,16 +89,16 @@ def append_row(
         str(user_id),
         user_name or "",
         action,
-        f"'{current_off:.1f}",
-        f"'{('+' if add_subtract >= 0 else '')}{add_subtract:.1f}",
-        f"'{final_off:.1f}",
+        f"{current_off:.1f}",
+        f"{'+' if add_subtract >= 0 else ''}{add_subtract:.1f}",
+        f"{final_off:.1f}",
         approved_by,
         application_date,
         remarks,
         "Special" if is_special else ("Yes" if is_ph else "No"),
-        f"'{ph_total:.1f}" if is_ph else "",
+        f"{ph_total:.1f}" if is_ph else "",
         expiry or "",
-        f"'{special_total:.1f}" if is_special else "",
+        f"{special_total:.1f}" if is_special else "",
     ]
     get_worksheet().append_row(row)
 
