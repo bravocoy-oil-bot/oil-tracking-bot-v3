@@ -49,6 +49,138 @@ def _sheet_action_label(action: str) -> str:
     return "Claim Off" if "claim" in action else "Clock Off"
 
 
+def _sheet_action_from_amount(amount: float) -> str:
+    return "Clock Off" if amount >= 0 else "Claim Off"
+
+
+def _extract_unique_users():
+    rows = get_all_rows()
+    seen = set()
+    users = []
+    for r in rows[1:]:
+        if len(r) < 3:
+            continue
+        uid = str(r[1]).strip()
+        name = str(r[2]).strip() or uid
+        if not uid or uid in seen:
+            continue
+        seen.add(uid)
+        users.append((uid, name))
+    users.sort(key=lambda x: x[1].lower())
+    return users
+
+
+def build_adjust_user_keyboard(session_id: str) -> InlineKeyboardMarkup:
+    users = _extract_unique_users()
+    buttons = []
+    row = []
+    for uid, name in users:
+        row.append(
+            InlineKeyboardButton(
+                name[:24],
+                callback_data=f"adjuser|{session_id}|{uid}",
+            )
+        )
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data=f"cancel|{session_id}")])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def _is_admin_in_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
+    try:
+        admins = await context.bot.get_chat_administrators(chat_id)
+        return any(a.user.id == user_id for a in admins)
+    except Exception:
+        return False
+
+
+def _adjust_type_flags(kind: str):
+    is_ph = kind == "ph"
+    is_special = kind == "special"
+    return is_ph, is_special
+
+
+def _format_adjustoil_preview(payload: dict) -> str:
+    amount = float(payload["amount"])
+    operator = "+" if amount >= 0 else "-"
+    abs_amount = abs(amount)
+
+    lines = [
+        "🛠 *Adjust OIL Confirmation*",
+        "",
+        f"👤 User: {payload['target_name']} ({payload['target_user_id']})",
+        f"🏷 Type: {payload['oil_type'].title()}",
+        f"🔢 Adjustment: {amount:+.1f}",
+        f"📅 Application Date: {payload['application_date']}",
+        f"📝 Remarks: {payload['remarks']}",
+        "",
+        "*Balances Before*",
+        f"- Total: {payload['current_total']:.1f}",
+        f"- Normal: {payload['current_normal']:.1f}",
+        f"- PH: {payload['current_ph']:.1f}",
+        f"- Special: {payload['current_special']:.1f}",
+        "",
+        "*Balances After*",
+        f"- Total: {payload['projected_total']:.1f}",
+        f"- Normal: {payload['projected_normal']:.1f}",
+        f"- PH: {payload['projected_ph']:.1f}",
+        f"- Special: {payload['projected_special']:.1f}",
+        "",
+        f"📘 Ledger Row: {payload['current_total']:.1f} {operator} {abs_amount:.1f} = {payload['projected_total']:.1f}",
+    ]
+    if payload.get("expiry"):
+        lines.append(f"⏳ Expiry: {payload['expiry']}")
+    return "\n".join(lines)
+
+
+async def apply_adjustoil_payload(context: ContextTypes.DEFAULT_TYPE, payload: dict):
+    uid = payload["target_user_id"]
+    uname = payload["target_name"]
+    amount = float(payload["amount"])
+    approver_name = payload["admin_name"]
+    app_date = payload["application_date"]
+    remarks = payload["remarks"]
+    is_ph = payload["is_ph"]
+    is_special = payload["is_special"]
+    expiry = payload.get("expiry", "")
+
+    current_off = last_off_for_user(uid)
+    final_off = current_off + amount
+
+    ph_total = 0.0
+    special_total = 0.0
+
+    if is_ph:
+        before, _ = compute_ph_entries_active(uid)
+        ph_total = before + amount
+
+    if is_special:
+        before, _active_special, _expired_special = compute_special_entries_breakdown(uid)
+        special_total = before + amount
+
+    append_row(
+        user_id=uid,
+        user_name=uname,
+        action=_sheet_action_from_amount(amount),
+        current_off=current_off,
+        add_subtract=amount,
+        final_off=final_off,
+        approved_by=approver_name,
+        application_date=app_date,
+        remarks=remarks,
+        is_ph=is_ph,
+        ph_total=ph_total,
+        expiry=expiry,
+        is_special=is_special,
+        special_total=special_total,
+    )
+
+
 def build_admin_summary_text(payload: dict, approved: bool, approver_name: str, final_off: float | None) -> str:
     status = "✅ Approved" if approved else "❌ Denied"
 
@@ -228,6 +360,43 @@ async def cmd_claimspecialoff(update: Update, context: ContextTypes.DEFAULT_TYPE
     await start_flow_days(update, context, "special", "claimspecialoff", False)
 
 
+async def cmd_adjustoil(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if not chat or chat.type == "private":
+        await update.message.reply_text("Please use /adjustoil inside the group.")
+        return
+
+    is_admin = await _is_admin_in_chat(context, chat.id, update.effective_user.id)
+    if not is_admin:
+        await reply_quiet(update, "❌ Only group admins can use /adjustoil.")
+        return
+
+    sid = str(uuid4())[:10]
+    user_state[update.effective_user.id] = {
+        "sid": sid,
+        "flow": "adjustoil",
+        "stage": "awaiting_type",
+        "group_id": chat.id,
+        "owner_id": update.effective_user.id,
+        "admin_name": update.effective_user.full_name,
+    }
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Normal", callback_data=f"adjtype|{sid}|normal"),
+            InlineKeyboardButton("PH", callback_data=f"adjtype|{sid}|ph"),
+            InlineKeyboardButton("Special", callback_data=f"adjtype|{sid}|special"),
+        ],
+        [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel|{sid}")],
+    ])
+
+    await reply_quiet(
+        update,
+        "🛠 Select which OIL type to adjust:",
+        reply_markup=kb,
+    )
+
+
 async def cmd_newuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type == "private":
@@ -274,44 +443,6 @@ async def finalize_single_request(update: Update, context: ContextTypes.DEFAULT_
     final = current_off + add
     is_ph = st["is_ph"]
     is_special = st["action"] in ("clockspecialoff", "claimspecialoff")
-
-    summary = compute_user_summary(str(uid), get_all_rows)
-    current_normal = summary.normal_balance
-    current_ph = summary.ph_active
-    current_special = summary.special_active
-
-    projected_normal = current_normal
-    projected_ph = current_ph
-    projected_special = current_special
-
-    if st["action"] == "claimoff":
-        projected_normal = current_normal - days
-    elif st["action"] == "claimphoff":
-        projected_ph = current_ph - days
-    elif st["action"] == "claimspecialoff":
-        projected_special = current_special - days
-    elif st["action"] == "clockoff":
-        projected_normal = current_normal + days
-    elif st["action"] == "clockphoff":
-        projected_ph = current_ph + days
-    elif st["action"] == "clockspecialoff":
-        projected_special = current_special + days
-
-    if st["action"] == "claimphoff" and days > current_ph:
-        await reply_quiet(
-            update,
-            f"❌ You only have {current_ph:.1f} active PH OIL available.\n"
-            f"Requested claim: {days:.1f}",
-        )
-        return
-
-    if st["action"] == "claimspecialoff" and days > current_special:
-        await reply_quiet(
-            update,
-            f"❌ You only have {current_special:.1f} active Special OIL available.\n"
-            f"Requested claim: {days:.1f}",
-        )
-        return
 
     ok, msg = validate_application_date(st["action"], app_date)
     if not ok:
@@ -360,15 +491,6 @@ async def finalize_single_request(update: Update, context: ContextTypes.DEFAULT_
         "ph_total_after": ph_total_after,
         "special_total_after": special_total_after,
         "admin_msgs": [],
-        "current_total": summary.total_balance,
-        "current_normal": current_normal,
-        "current_ph": current_ph,
-        "current_special": current_special,
-        "projected_total": projected_normal + projected_ph + projected_special,
-        "projected_normal": projected_normal,
-        "projected_ph": projected_ph,
-        "projected_special": projected_special,
-        "warn_negative_normal": projected_normal < 0,
     }
 
     try:
@@ -381,44 +503,26 @@ async def finalize_single_request(update: Update, context: ContextTypes.DEFAULT_
         InlineKeyboardButton("❌ Deny", callback_data=f"deny|{key}"),
     ]])
 
-    off_type = _off_type_label(st["action"], is_ph, is_special)
-    display_action = _label_from_action(st["action"])
-
-    text_lines = [
-        f"🆕 *{display_action} Request [{off_type}]*",
-        "",
-        f"👤 User: {user.full_name} ({uid})",
-        f"📅 Days: {days:.1f}",
-        f"🗓 Application Date: {app_date}",
-        f"📝 Reason: {st.get('reason', '') or '—'}",
-        "",
-        "*Balances Before*",
-        f"- Total: {summary.total_balance:.1f}",
-        f"- Normal: {current_normal:.1f}",
-        f"- PH: {current_ph:.1f}",
-        f"- Special: {current_special:.1f}",
-        "",
-        "*Balances After*",
-        f"- Total: {(projected_normal + projected_ph + projected_special):.1f}",
-        f"- Normal: {projected_normal:.1f}",
-        f"- PH: {projected_ph:.1f}",
-        f"- Special: {projected_special:.1f}",
-    ]
+    label = _label_from_action(st["action"])
+    text = (
+        f"🆕 *{label} Request*\n\n"
+        f"👤 User: {user.full_name} ({uid})\n"
+        f"📅 Days: {days}\n"
+        f"🗓 Application Date: {app_date}\n"
+        f"📝 Reason: {st.get('reason', '') or '—'}\n\n"
+        f"📊 Current Off: {current_off:.1f}\n"
+        f"📈 New Balance: {final:.1f}"
+    )
 
     if is_ph and expiry:
-        text_lines.append(f"🏖 PH Expiry: {expiry}")
+        text += f"\n🏖 PH Expiry: {expiry}"
+        if ph_total_after is not None:
+            text += f"\n🏖 PH Total After: {ph_total_after:.1f}"
 
     if is_special and expiry:
-        text_lines.append(f"⭐ Special Expiry: {expiry}")
-
-    if projected_normal < 0 and st["action"] == "claimoff":
-        text_lines.extend([
-            "",
-            "⚠️ *Warning*",
-            f"Normal OIL will go negative after approval: {projected_normal:.1f}",
-        ])
-
-    text = "\n".join(text_lines)
+        text += f"\n⭐ Special Expiry: {expiry}"
+        if special_total_after is not None:
+            text += f"\n⭐ Special Total After: {special_total_after:.1f}"
 
     sent_any = False
     admin_msgs = []
@@ -686,6 +790,133 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Allowed date range: {st['min_date']} to {st['max_date']}",
             parse_mode="Markdown",
             reply_markup=build_calendar(st["sid"], date.today(), st["min_date"], st["max_date"]),
+        )
+        return
+
+    if st["flow"] == "adjustoil" and st["stage"] == "awaiting_amount":
+        try:
+            amount = float(text)
+            if amount == 0 or not validate_half_step(amount):
+                raise ValueError()
+        except ValueError:
+            await reply_quiet(
+                update,
+                "❌ Invalid input. Use positive to add or negative to subtract in 0.5 steps.\nExamples: 1.0, -0.5",
+                reply_markup=cancel_keyboard(st["sid"]),
+            )
+            return
+
+        target_uid = st["target_user_id"]
+        target_name = st["target_name"]
+        oil_type = st["oil_type"]
+        is_ph, is_special = _adjust_type_flags(oil_type)
+
+        summary = compute_user_summary(str(target_uid), get_all_rows)
+        current_total = summary.total_balance
+        current_normal = summary.normal_balance
+        current_ph = summary.ph_active
+        current_special = summary.special_active
+
+        projected_normal = current_normal
+        projected_ph = current_ph
+        projected_special = current_special
+
+        if oil_type == "normal":
+            projected_normal += amount
+        elif oil_type == "ph":
+            projected_ph += amount
+        elif oil_type == "special":
+            projected_special += amount
+
+        if oil_type == "ph" and projected_ph < 0:
+            await reply_quiet(
+                update,
+                f"❌ PH OIL cannot go below 0.\nCurrent active PH: {current_ph:.1f}\nRequested adjustment: {amount:+.1f}",
+                reply_markup=cancel_keyboard(st["sid"]),
+            )
+            return
+
+        if oil_type == "special" and projected_special < 0:
+            await reply_quiet(
+                update,
+                f"❌ Special OIL cannot go below 0.\nCurrent active Special: {current_special:.1f}\nRequested adjustment: {amount:+.1f}",
+                reply_markup=cancel_keyboard(st["sid"]),
+            )
+            return
+
+        app_date = date.today().strftime("%Y-%m-%d")
+        expiry = ""
+        if amount > 0 and oil_type in ("ph", "special"):
+            expiry = (date.today() + timedelta(days=365)).strftime("%Y-%m-%d")
+
+        st["amount"] = amount
+        st["application_date"] = app_date
+        st["is_ph"] = is_ph
+        st["is_special"] = is_special
+        st["current_total"] = current_total
+        st["current_normal"] = current_normal
+        st["current_ph"] = current_ph
+        st["current_special"] = current_special
+        st["projected_total"] = projected_normal + projected_ph + projected_special
+        st["projected_normal"] = projected_normal
+        st["projected_ph"] = projected_ph
+        st["projected_special"] = projected_special
+        st["expiry"] = expiry
+        st["stage"] = "awaiting_reason"
+
+        await reply_quiet(
+            update,
+            "📝 Enter reason for this adjustment.",
+            reply_markup=cancel_keyboard(st["sid"]),
+        )
+        return
+
+    if st["flow"] == "adjustoil" and st["stage"] == "awaiting_reason":
+        reason = text.strip()
+        if not reason or reason.lower() == "nil":
+            await reply_quiet(
+                update,
+                "❌ Reason is required for admin adjustment.",
+                reply_markup=cancel_keyboard(st["sid"]),
+            )
+            return
+
+        payload = {
+            "target_user_id": st["target_user_id"],
+            "target_name": st["target_name"],
+            "oil_type": st["oil_type"],
+            "amount": st["amount"],
+            "application_date": st["application_date"],
+            "remarks": f"Admin adjustment by {st['admin_name']}: {reason[:120]}",
+            "admin_name": st["admin_name"],
+            "is_ph": st["is_ph"],
+            "is_special": st["is_special"],
+            "current_total": st["current_total"],
+            "current_normal": st["current_normal"],
+            "current_ph": st["current_ph"],
+            "current_special": st["current_special"],
+            "projected_total": st["projected_total"],
+            "projected_normal": st["projected_normal"],
+            "projected_ph": st["projected_ph"],
+            "projected_special": st["projected_special"],
+            "expiry": st.get("expiry", ""),
+        }
+
+        st["payload"] = payload
+        st["stage"] = "awaiting_confirm"
+
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Confirm", callback_data=f"adjconfirm|{st['sid']}"),
+                InlineKeyboardButton("❌ Cancel", callback_data=f"cancel|{st['sid']}"),
+            ]
+        ])
+
+        await reply_quiet(
+            update,
+            _format_adjustoil_preview(payload),
+            parse_mode="Markdown",
+            reply_markup=kb,
         )
         return
 
