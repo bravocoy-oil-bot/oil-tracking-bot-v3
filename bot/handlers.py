@@ -22,6 +22,97 @@ from services.sheets_repo import (
     try_get_worksheet_title,
 )
 
+SEPARATOR = "────────────────────"
+
+
+async def _is_admin_in_chat(context, chat_id: int, user_id: int) -> bool:
+    try:
+        admins = await context.bot.get_chat_administrators(chat_id)
+        return any(a.user.id == user_id for a in admins)
+    except Exception:
+        return False
+
+
+def _off_type(row) -> str:
+    kind = (row.holiday_kind or "").strip().lower()
+    if kind == "special":
+        return "Special"
+    if kind in ("yes", "y", "true", "1"):
+        return "PH"
+    return "Normal"
+
+
+def _build_user_detail_block(summary, recent_rows) -> str:
+    lines = [
+        f"{summary.user_name}",
+        f"   🔹 Total: {summary.total_balance:.1f}",
+        f"   🔸 Normal: {summary.normal_balance:.1f}",
+        f"   🏖 Active PH: {summary.ph_active:.1f}",
+        f"   ❌ Expired PH: {summary.ph_expired:.1f}",
+        f"   ⭐ Active Special: {summary.special_active:.1f}",
+        f"   ❌ Expired Special: {summary.special_expired:.1f}",
+    ]
+
+    if summary.normal_balance < 0:
+        lines.append("   ⚠️ Negative normal balance")
+
+    if summary.ph_active_entries:
+        lines.append("")
+        lines.append("   🏖✅ Active PH Details")
+        for e in summary.ph_active_entries:
+            lines.extend([
+                f"   - {e.remarks or 'PH'}: {e.qty:.1f}",
+                f"     📅 Clocked: {e.date}",
+                f"     ⏳ Expiry: {e.expiry or '—'}",
+            ])
+
+    if summary.ph_expired_entries:
+        lines.append("")
+        lines.append("   🏖❌ Expired PH Details")
+        for e in summary.ph_expired_entries:
+            lines.extend([
+                f"   - {e.remarks or 'PH'}: {e.qty:.1f}",
+                f"     📅 Clocked: {e.date}",
+                f"     ❌ Expired: {e.expiry or '—'}",
+            ])
+
+    if summary.special_active_entries:
+        lines.append("")
+        lines.append("   ⭐✅ Active Special Details")
+        for e in summary.special_active_entries:
+            lines.extend([
+                f"   - {e.remarks or 'Special'}: {e.qty:.1f}",
+                f"     📅 Clocked: {e.date}",
+                f"     ⏳ Expiry: {e.expiry or '—'}",
+            ])
+
+    if summary.special_expired_entries:
+        lines.append("")
+        lines.append("   ⭐❌ Expired Special Details")
+        for e in summary.special_expired_entries:
+            lines.extend([
+                f"   - {e.remarks or 'Special'}: {e.qty:.1f}",
+                f"     📅 Clocked: {e.date}",
+                f"     ❌ Expired: {e.expiry or '—'}",
+            ])
+
+    if recent_rows:
+        lines.append("")
+        lines.append("   📝 Recent Records")
+        for r in recent_rows:
+            is_plus = r.delta >= 0
+            symbol = "🟢" if is_plus else "🔴"
+            operator = "+" if is_plus else "-"
+            amount = abs(r.delta)
+            lines.extend([
+                f"   - {symbol} {r.action} [{_off_type(r)}]",
+                f"     {r.current_off:.1f} {operator} {amount:.1f} = {r.final_off:.1f}",
+                f"     📅 {r.application_date or r.timestamp[:10]}",
+                f"     📝 {r.remarks or '—'}",
+            ])
+
+    return "\n".join(lines)
+
 
 async def cmd_start(update, context):
     await update.message.reply_text(START_TEXT)
@@ -117,14 +208,6 @@ async def cmd_history(update, context):
         await update.message.reply_text("📜 No records found.")
         return
 
-    def get_off_type(row):
-        kind = (row.holiday_kind or "").strip().lower()
-        if kind == "special":
-            return "Special"
-        if kind in ("yes", "y", "true", "1"):
-            return "PH"
-        return "Normal"
-
     lines = ["📜 *Your Recent OIL Records*"]
 
     for i, r in enumerate(recent, start=1):
@@ -132,7 +215,7 @@ async def cmd_history(update, context):
         symbol = "🟢" if is_plus else "🔴"
         operator = "+" if is_plus else "-"
         amount = abs(r.delta)
-        off_type = get_off_type(r)
+        off_type = _off_type(r)
 
         lines.append("")
         lines.append(
@@ -180,6 +263,42 @@ async def cmd_overview(update, context):
         await update.message.reply_text(chunk.strip(), parse_mode="Markdown")
 
 
+async def cmd_detailedoverview(update, context):
+    chat = update.effective_chat
+    if not chat or chat.type == "private":
+        await update.message.reply_text("Please use /detailedoverview inside the group.")
+        return
+
+    is_admin = await _is_admin_in_chat(context, chat.id, update.effective_user.id)
+    if not is_admin:
+        await update.message.reply_text("❌ Only group admins can use /detailedoverview.")
+        return
+
+    items = compute_overview(get_all_rows)
+    if not items:
+        await update.message.reply_text("No records found.")
+        return
+
+    header = "📋 *Detailed Sector OIL Overview*"
+    chunk = header
+
+    for idx, s in enumerate(items, start=1):
+        recent = get_user_last_records(s.user_id, get_all_rows, limit=3)
+        block = f"\n\n{idx}) " + _build_user_detail_block(s, recent)
+
+        if idx > 1:
+            block = f"\n\n{SEPARATOR}\n" + block
+
+        if len(chunk) + len(block) > 3800:
+            await update.message.reply_text(chunk.strip(), parse_mode="Markdown")
+            chunk = block.lstrip()
+        else:
+            chunk += block
+
+    if chunk.strip():
+        await update.message.reply_text(chunk.strip(), parse_mode="Markdown")
+
+
 def register_handlers(application):
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("help", cmd_help))
@@ -202,6 +321,7 @@ def register_handlers(application):
 
     application.add_handler(CommandHandler("summary", cmd_summary))
     application.add_handler(CommandHandler("overview", cmd_overview))
+    application.add_handler(CommandHandler("detailedoverview", cmd_detailedoverview))
 
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
