@@ -1,8 +1,19 @@
 from datetime import date, datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
+
+SG_TZ = ZoneInfo("Asia/Singapore")
+
+
+def sg_now() -> datetime:
+    return datetime.now(SG_TZ)
+
+
+def sg_today() -> date:
+    return sg_now().date()
 
 
 def cancel_keyboard(session_id: str) -> InlineKeyboardMarkup:
@@ -122,6 +133,30 @@ def build_calendar(
     return InlineKeyboardMarkup([header, week_hdr] + rows + [nav, cancel])
 
 
+def build_calendar_with_recovery(
+    sid: str,
+    current_date: date,
+    min_date: Optional[date],
+    max_date: Optional[date],
+    section: str,
+) -> InlineKeyboardMarkup:
+    kb = build_calendar(sid, current_date, min_date, max_date)
+
+    if section == "ph":
+        redo_btn = InlineKeyboardButton("🔁 Redo PH Off", callback_data=f"redo_ph|{sid}")
+    else:
+        redo_btn = InlineKeyboardButton("🔁 Redo Special Off", callback_data=f"redo_special|{sid}")
+
+    cancel_btn = InlineKeyboardButton("❌ Cancel", callback_data=f"cancel|{sid}")
+
+    if kb.inline_keyboard:
+        kb.inline_keyboard[-1] = [redo_btn, cancel_btn]
+    else:
+        kb.inline_keyboard.append([redo_btn, cancel_btn])
+
+    return kb
+
+
 def validate_half_step(value: float) -> bool:
     return abs((value * 10) % 5) < 1e-9
 
@@ -140,7 +175,7 @@ def validate_application_date(action: str, dstr: str) -> tuple[bool, str]:
     except Exception:
         return False, "Invalid date. Use YYYY-MM-DD."
 
-    today = date.today()
+    today = sg_today()
     past_365 = today - timedelta(days=365)
 
     if action in ("clockoff", "clockphoff", "clockspecialoff", "mass", "newuser_ph"):
