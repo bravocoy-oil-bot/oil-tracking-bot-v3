@@ -16,14 +16,12 @@ from bot.ui import (
     validate_application_date,
     validate_half_step,
 )
-from services.ledger import compute_user_summary
+from services.ledger import compute_user_summary, rebuild_user_balance
 from services.runtime_state import pending_payloads, user_state
 from services.sheets_repo import (
-    append_row,
-    compute_ph_entries_active,
-    compute_special_entries_breakdown,
+    append_ledger_row,
     get_all_rows,
-    last_off_for_user,
+    list_all_known_users,
 )
 
 log = logging.getLogger(__name__)
@@ -45,29 +43,26 @@ def _off_type_label(action: str, is_ph: bool = False, is_special: bool = False) 
     return "Normal"
 
 
-def _sheet_action_label(action: str) -> str:
-    return "Claim Off" if "claim" in action else "Clock Off"
+def _adjust_type_flags(kind: str):
+    is_ph = kind == "ph"
+    is_special = kind == "special"
+    return is_ph, is_special
 
 
-def _sheet_action_from_amount(amount: float) -> str:
-    return "Clock Off" if amount >= 0 else "Claim Off"
+def _off_type_value(is_ph: bool, is_special: bool) -> str:
+    if is_special:
+        return "SPECIAL"
+    if is_ph:
+        return "PH"
+    return "NORMAL"
+
+
+def _request_action_type(action: str) -> str:
+    return "CLAIM" if "claim" in action else "CLOCK"
 
 
 def _extract_unique_users():
-    rows = get_all_rows()
-    seen = set()
-    users = []
-    for r in rows[1:]:
-        if len(r) < 3:
-            continue
-        uid = str(r[1]).strip()
-        name = str(r[2]).strip() or uid
-        if not uid or uid in seen:
-            continue
-        seen.add(uid)
-        users.append((uid, name))
-    users.sort(key=lambda x: x[1].lower())
-    return users
+    return list_all_known_users()
 
 
 def build_adjust_user_keyboard(session_id: str) -> InlineKeyboardMarkup:
@@ -97,12 +92,6 @@ async def _is_admin_in_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int, us
         return any(a.user.id == user_id for a in admins)
     except Exception:
         return False
-
-
-def _adjust_type_flags(kind: str):
-    is_ph = kind == "ph"
-    is_special = kind == "special"
-    return is_ph, is_special
 
 
 def _format_adjustoil_preview(payload: dict) -> str:
@@ -168,36 +157,19 @@ async def apply_adjustoil_payload(context: ContextTypes.DEFAULT_TYPE, payload: d
     is_special = payload["is_special"]
     expiry = payload.get("expiry", "")
 
-    current_off = last_off_for_user(uid)
-    final_off = current_off + amount
-
-    ph_total = 0.0
-    special_total = 0.0
-
-    if is_ph:
-        before, _ = compute_ph_entries_active(uid)
-        ph_total = before + amount
-
-    if is_special:
-        before, _active_special, _expired_special = compute_special_entries_breakdown(uid)
-        special_total = before + amount
-
-    append_row(
-        user_id=uid,
-        user_name=uname,
-        action=_sheet_action_from_amount(amount),
-        current_off=current_off,
-        add_subtract=amount,
-        final_off=final_off,
-        approved_by=approver_name,
+    append_ledger_row(
+        telegram_id=uid,
+        name=uname,
+        action_type="ADJUST",
+        off_type=_off_type_value(is_ph, is_special),
+        amount=amount,
         application_date=app_date,
+        expiry_date=expiry if amount > 0 and (is_ph or is_special) else "",
         remarks=remarks,
-        is_ph=is_ph,
-        ph_total=ph_total,
-        expiry=expiry,
-        is_special=is_special,
-        special_total=special_total,
+        approved_by=approver_name,
+        source="ADMIN",
     )
+    rebuild_user_balance(uid, get_all_rows)
 
 
 async def apply_massadjust_payload(context: ContextTypes.DEFAULT_TYPE, payload: dict):
@@ -225,36 +197,19 @@ async def apply_massadjust_payload(context: ContextTypes.DEFAULT_TYPE, payload: 
             skipped.append(uname)
             continue
 
-        current_off = last_off_for_user(uid)
-        final_off = current_off + amount
-
-        ph_total = 0.0
-        special_total = 0.0
-
-        if is_ph:
-            before, _ = compute_ph_entries_active(uid)
-            ph_total = before + amount
-
-        if is_special:
-            before, _active_special, _expired_special = compute_special_entries_breakdown(uid)
-            special_total = before + amount
-
-        append_row(
-            user_id=uid,
-            user_name=uname,
-            action=_sheet_action_from_amount(amount),
-            current_off=current_off,
-            add_subtract=amount,
-            final_off=final_off,
-            approved_by=approver_name,
+        append_ledger_row(
+            telegram_id=uid,
+            name=uname,
+            action_type="MASS_ADJUST",
+            off_type=_off_type_value(is_ph, is_special),
+            amount=amount,
             application_date=app_date,
+            expiry_date=expiry if amount > 0 and (is_ph or is_special) else "",
             remarks=remarks,
-            is_ph=is_ph,
-            ph_total=ph_total,
-            expiry=expiry,
-            is_special=is_special,
-            special_total=special_total,
+            approved_by=approver_name,
+            source="ADMIN",
         )
+        rebuild_user_balance(uid, get_all_rows)
         adjusted.append(uname)
 
     return adjusted, skipped
@@ -340,27 +295,6 @@ async def cmd_startadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "owner_id": update.effective_user.id,
     }
     await update.message.reply_text("✅ Admin session started here. You’ll receive approval prompts in this PM.")
-
-
-async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    rows = get_all_rows()
-    urows = [r for r in rows if len(r) > 1 and r[1] == uid]
-    if not urows:
-        await reply_quiet(update, "📜 No logs found.")
-        return
-
-    last5 = urows[-5:]
-    out = []
-    for r in last5:
-        ts = r[0] if len(r) > 0 else ""
-        action = r[3] if len(r) > 3 else ""
-        delta = r[5] if len(r) > 5 else ""
-        final = r[6] if len(r) > 6 else ""
-        remarks = r[9] if len(r) > 9 else ""
-        out.append(f"{ts} | {action} | {delta} → {final} | {remarks}")
-
-    await reply_quiet(update, "📜 Your last 5 OIL logs:\n\n" + "\n".join(out))
 
 
 async def start_flow_days(update: Update, context: ContextTypes.DEFAULT_TYPE, flow: str, action: str, is_ph: bool):
@@ -518,7 +452,7 @@ async def cmd_newuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     sid = str(uuid4())[:10]
     rows = get_all_rows()
-    exists = any(len(r) > 1 and r[1] == str(uid) for r in rows)
+    exists = any(len(r) > 1 and r[1] == str(uid) for r in rows[1:])
     if exists:
         await reply_quiet(update, "You already have records here. Import is only for brand-new users.")
         return
@@ -550,9 +484,6 @@ async def finalize_single_request(update: Update, context: ContextTypes.DEFAULT_
     group_id = st.get("group_id") or (update.effective_chat.id if update.effective_chat else None)
 
     days = float(st["days"])
-    current_off = last_off_for_user(str(uid))
-    add = days if st["action"] in ("clockoff", "clockphoff", "clockspecialoff") else -days
-    final = current_off + add
     is_ph = st["is_ph"]
     is_special = st["action"] in ("clockspecialoff", "claimspecialoff")
 
@@ -579,7 +510,6 @@ async def finalize_single_request(update: Update, context: ContextTypes.DEFAULT_
     elif st["action"] == "clockspecialoff":
         projected_special = current_special + days
 
-    # Hard stop for PH / Special negative claims
     if st["action"] == "claimphoff" and days > current_ph:
         await reply_quiet(
             update,
@@ -602,28 +532,12 @@ async def finalize_single_request(update: Update, context: ContextTypes.DEFAULT_
         return
 
     expiry = ""
-    ph_total_after = None
-    special_total_after = None
-
-    if is_ph:
-        if st["action"] == "clockphoff":
-            try:
-                d = datetime.strptime(app_date, "%Y-%m-%d").date()
-                expiry = (d + timedelta(days=365)).strftime("%Y-%m-%d")
-            except Exception:
-                expiry = ""
-        before, _ = compute_ph_entries_active(str(uid))
-        ph_total_after = before + (days if st["action"] == "clockphoff" else -days)
-
-    if is_special:
-        if st["action"] == "clockspecialoff":
-            try:
-                d = datetime.strptime(app_date, "%Y-%m-%d").date()
-                expiry = (d + timedelta(days=365)).strftime("%Y-%m-%d")
-            except Exception:
-                expiry = ""
-        before, _active_special, _expired_special = compute_special_entries_breakdown(str(uid))
-        special_total_after = before + (days if st["action"] == "clockspecialoff" else -days)
+    if (st["action"] == "clockphoff") or (st["action"] == "clockspecialoff"):
+        try:
+            d = datetime.strptime(app_date, "%Y-%m-%d").date()
+            expiry = (d + timedelta(days=365)).strftime("%Y-%m-%d")
+        except Exception:
+            expiry = ""
 
     key = str(uuid4())[:12]
     payload = {
@@ -635,16 +549,10 @@ async def finalize_single_request(update: Update, context: ContextTypes.DEFAULT_
         "days": days,
         "reason": st.get("reason", ""),
         "app_date": app_date,
-        "current_off": current_off,
-        "final_off": final,
         "is_ph": is_ph,
         "is_special": is_special,
         "expiry": expiry,
-        "ph_total_after": ph_total_after,
-        "special_total_after": special_total_after,
         "admin_msgs": [],
-
-        # split balances for admin preview / approval summary
         "current_total": current_total,
         "current_normal": current_normal,
         "current_ph": current_ph,
@@ -690,11 +598,11 @@ async def finalize_single_request(update: Update, context: ContextTypes.DEFAULT_
         f"- Special: {projected_special:.1f}",
     ]
 
-    if is_ph and expiry:
-        text_lines.append(f"🏖 PH Expiry: {expiry}")
-
-    if is_special and expiry:
-        text_lines.append(f"⭐ Special Expiry: {expiry}")
+    if expiry:
+        if is_ph:
+            text_lines.append(f"🏖 PH Expiry: {expiry}")
+        if is_special:
+            text_lines.append(f"⭐ Special Expiry: {expiry}")
 
     if projected_normal < 0 and st["action"] == "claimoff":
         text_lines.extend([
@@ -819,42 +727,24 @@ async def handle_single_apply(update: Update, context: ContextTypes.DEFAULT_TYPE
     reason = payload.get("reason", "")
     is_ph = bool(payload.get("is_ph"))
     is_special = bool(payload.get("is_special"))
-
-    current = last_off_for_user(uid)
-    add = days if "clock" in action else -days
-    final = current + add
-
     expiry = payload.get("expiry", "")
-    ph_total = 0.0
-    special_total = 0.0
 
-    if is_ph:
-        before, _ = compute_ph_entries_active(uid)
-        ph_total = before + (days if action == "clockphoff" else -days)
-
-    if is_special:
-        before, _active_special, _expired_special = compute_special_entries_breakdown(uid)
-        special_total = before + (days if action == "clockspecialoff" else -days)
-
-    append_row(
-        user_id=uid,
-        user_name=uname,
-        action=_sheet_action_label(action),
-        current_off=current,
-        add_subtract=add,
-        final_off=final,
-        approved_by=approver_name,
+    append_ledger_row(
+        telegram_id=uid,
+        name=uname,
+        action_type=_request_action_type(action),
+        off_type=_off_type_value(is_ph, is_special),
+        amount=(-days if "claim" in action else days),
         application_date=app_date,
+        expiry_date=(expiry if "clock" in action and (is_ph or is_special) else ""),
         remarks=reason,
-        is_ph=is_ph,
-        ph_total=ph_total,
-        expiry=expiry,
-        is_special=is_special,
-        special_total=special_total,
+        approved_by=approver_name,
+        source="USER",
     )
+    rebuild_user_balance(uid, get_all_rows)
 
     await send_group_quiet(context, gid, f"✅ Request for {uname} approved by {approver_name}.")
-    summary = build_admin_summary_text(payload, approved=True, approver_name=approver_name, final_off=final)
+    summary = build_admin_summary_text(payload, approved=True, approver_name=approver_name, final_off=None)
     await update_all_admin_pm(context, payload, summary)
 
 
@@ -872,22 +762,17 @@ async def handle_newuser_apply(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if normal_days > 0:
-        current = last_off_for_user(uid)
-        add = normal_days
-        final = current + add
-        append_row(
-            user_id=uid,
-            user_name=uname,
-            action="Clock Off",
-            current_off=current,
-            add_subtract=add,
-            final_off=final,
-            approved_by=approver_name,
+        append_ledger_row(
+            telegram_id=uid,
+            name=uname,
+            action_type="IMPORT",
+            off_type="NORMAL",
+            amount=normal_days,
             application_date=date.today().strftime("%Y-%m-%d"),
+            expiry_date="",
             remarks="Transfer from old record",
-            is_ph=False,
-            ph_total=0.0,
-            expiry="",
+            approved_by=approver_name,
+            source="USER",
         )
 
     for entry in ph_entries:
@@ -896,10 +781,6 @@ async def handle_newuser_apply(update: Update, context: ContextTypes.DEFAULT_TYP
         if not dstr:
             continue
 
-        current = last_off_for_user(uid)
-        add = 1.0
-        final = current + add
-
         expiry = ""
         try:
             d = datetime.strptime(dstr, "%Y-%m-%d").date()
@@ -907,23 +788,20 @@ async def handle_newuser_apply(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception:
             pass
 
-        before, _ = compute_ph_entries_active(uid)
-        ph_after = before + 1.0
-
-        append_row(
-            user_id=uid,
-            user_name=uname,
-            action="Clock Off",
-            current_off=current,
-            add_subtract=add,
-            final_off=final,
-            approved_by=approver_name,
+        append_ledger_row(
+            telegram_id=uid,
+            name=uname,
+            action_type="IMPORT",
+            off_type="PH",
+            amount=1.0,
             application_date=dstr,
+            expiry_date=expiry,
             remarks=reason,
-            is_ph=True,
-            ph_total=ph_after,
-            expiry=expiry,
+            approved_by=approver_name,
+            source="USER",
         )
+
+    rebuild_user_balance(uid, get_all_rows)
 
     await send_group_quiet(context, gid, f"✅ Onboarding import for {uname} approved by {approver_name}.")
     summary = build_admin_summary_text(payload, approved=True, approver_name=approver_name, final_off=None)
@@ -1068,7 +946,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "oil_type": st["oil_type"],
             "amount": st["amount"],
             "application_date": st["application_date"],
-            "remarks": f"Admin adjustment by {st['admin_name']}: {reason[:120]}",
+            "remarks": reason[:120],
             "admin_name": st["admin_name"],
             "is_ph": st["is_ph"],
             "is_special": st["is_special"],
@@ -1160,7 +1038,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "oil_type": st["oil_type"],
             "amount": st["amount"],
             "application_date": st["application_date"],
-            "remarks": f"Mass adjustment by {st['admin_name']}: {reason[:120]}",
+            "remarks": reason[:120],
             "admin_name": st["admin_name"],
             "is_ph": st["is_ph"],
             "is_special": st["is_special"],
