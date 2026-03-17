@@ -7,7 +7,6 @@ from bot.conversations import (
     build_admin_summary_text,
     handle_newuser_apply,
     handle_single_apply,
-    update_all_admin_pm,
 )
 from bot.ui import (
     _is_group,
@@ -17,7 +16,6 @@ from bot.ui import (
     validate_application_date,
 )
 from services.runtime_state import pending_payloads, user_state
-from services.sheets_repo import last_off_for_user
 
 
 async def handle_callback(update, context):
@@ -55,7 +53,16 @@ async def handle_callback(update, context):
     if kind == "noop":
         return
 
-    if kind in ("calnav", "manual", "cal", "adjtype", "adjuser", "adjconfirm", "massadjtype", "massadjconfirm"):
+    if kind in (
+        "calnav",
+        "manual",
+        "cal",
+        "adjtype",
+        "adjuser",
+        "adjconfirm",
+        "massadjtype",
+        "massadjconfirm",
+    ):
         if not_owner_block():
             await q.answer("This isn’t your session.", show_alert=True)
             return
@@ -76,7 +83,9 @@ async def handle_callback(update, context):
 
     if kind == "adjuser":
         target_uid = parts[2]
-        users = {uid: name for uid, name in __import__("bot.conversations", fromlist=["_extract_unique_users"])._extract_unique_users()}
+        from bot.conversations import _extract_unique_users  # local import to avoid circular issues
+
+        users = {uid: name for uid, name in _extract_unique_users()}
         st["target_user_id"] = str(target_uid)
         st["target_name"] = users.get(str(target_uid), str(target_uid))
         st["stage"] = "awaiting_amount"
@@ -107,7 +116,7 @@ async def handle_callback(update, context):
                 "✅ Adjustment applied successfully.\n\n"
                 f"User: {payload['target_name']} ({payload['target_user_id']})\n"
                 f"Type: {payload['oil_type'].title()}\n"
-                f"Adjustment: {payload['amount']:+.1f}",
+                f"Adjustment: {payload['amount']:+.1f}"
             )
         except Exception:
             pass
@@ -258,6 +267,7 @@ async def handle_callback(update, context):
         payload = pending_payloads.pop(key, None)
         approver = q.from_user.full_name
         approver_id = q.from_user.id
+        approved = kind == "approve"
 
         if not payload:
             try:
@@ -267,8 +277,13 @@ async def handle_callback(update, context):
             return
 
         if payload.get("type") == "newuser":
-            await handle_newuser_apply(update, context, payload, kind == "approve", approver, approver_id)
-            summary = build_admin_summary_text(payload, approved=(kind == "approve"), approver_name=approver, final_off=None)
+            await handle_newuser_apply(update, context, payload, approved, approver, approver_id)
+            summary = build_admin_summary_text(
+                payload,
+                approved=approved,
+                approver_name=approver,
+                final_off=None,
+            )
             try:
                 await q.edit_message_text(summary)
             except Exception:
@@ -276,21 +291,15 @@ async def handle_callback(update, context):
             return
 
         if payload.get("type") == "single":
-            await handle_single_apply(update, context, payload, kind == "approve", approver, approver_id)
-            final_off = None
-            if kind == "approve":
-                cur = last_off_for_user(payload["user_id"])
-                calc = cur + (payload["days"] if "clock" in payload["action"] else -payload["days"])
-                final_off = calc
+            await handle_single_apply(update, context, payload, approved, approver, approver_id)
+            summary = build_admin_summary_text(
+                payload,
+                approved=approved,
+                approver_name=approver,
+                final_off=None,
+            )
             try:
-                await q.edit_message_text(
-                    build_admin_summary_text(
-                        payload,
-                        approved=(kind == "approve"),
-                        approver_name=approver,
-                        final_off=final_off,
-                    )
-                )
+                await q.edit_message_text(summary)
             except Exception:
                 pass
             return
