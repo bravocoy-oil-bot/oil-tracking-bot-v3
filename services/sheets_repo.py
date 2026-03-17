@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -15,6 +16,13 @@ _BALANCES_WS = None
 
 LEDGER_TAB_NAME = "ledger"
 BALANCES_TAB_NAME = "balances"
+
+SG_TZ = ZoneInfo("Asia/Singapore")
+
+
+def sg_now() -> datetime:
+    return datetime.now(SG_TZ)
+
 
 LEDGER_HEADERS = [
     "Timestamp",
@@ -175,7 +183,7 @@ def append_ledger_row(
     approved_by: str,
     source: str,
 ) -> None:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = sg_now().strftime("%Y-%m-%d %H:%M:%S")
     row = [
         now,
         str(telegram_id),
@@ -219,7 +227,7 @@ def upsert_balance_row(
 ) -> None:
     ws = get_balances_worksheet()
     rows = get_all_balance_rows()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = sg_now().strftime("%Y-%m-%d %H:%M:%S")
 
     row_values = [
         str(telegram_id),
@@ -233,7 +241,6 @@ def upsert_balance_row(
         now,
     ]
 
-    # Find existing row by Telegram ID
     for idx, row in enumerate(rows[1:], start=2):
         if len(row) > 0 and str(row[0]).strip() == str(telegram_id):
             ws.update(f"A{idx}:I{idx}", [row_values])
@@ -291,7 +298,6 @@ def list_all_known_users() -> List[tuple[str, str]]:
         users.sort(key=lambda x: x[1].lower())
         return users
 
-    # fallback to ledger
     seen = set()
     for r in get_all_ledger_rows()[1:]:
         if len(r) < 3:
