@@ -33,6 +33,21 @@ def _validate_fifo_date(existing_entries: list[dict], new_date_str: str) -> tupl
     return True, ""
 
 
+def _current_calendar_anchor(st, fallback: str) -> date:
+    """
+    Keep the user on the month they are currently working in.
+    """
+    try:
+        if st and st.get("min_date"):
+            return st["min_date"] if False else datetime.strptime(fallback, "%Y-%m-%d").date()
+    except Exception:
+        pass
+    try:
+        return datetime.strptime(fallback, "%Y-%m-%d").date()
+    except Exception:
+        return date.today()
+
+
 async def handle_callback(update, context):
     if not update.callback_query:
         return
@@ -236,11 +251,10 @@ async def handle_callback(update, context):
         min_d = st.get("min_date")
         max_d = st.get("max_date")
 
-        # keep recovery buttons if user is in invalid FIFO retry path
         if st.get("flow") == "newuser" and st.get("stage") == "ph_date":
-            reply_markup = build_calendar_with_recovery(sid, target, min_d, max_d, "ph")
+            reply_markup = build_calendar(sid, target, min_d, max_d)
         elif st.get("flow") == "newuser" and st.get("stage") == "special_date":
-            reply_markup = build_calendar_with_recovery(sid, target, min_d, max_d, "special")
+            reply_markup = build_calendar(sid, target, min_d, max_d)
         else:
             reply_markup = build_calendar(sid, target, min_d, max_d)
 
@@ -325,22 +339,26 @@ async def handle_callback(update, context):
             if st["stage"] == "ph_date":
                 is_ok, prev_date = _validate_fifo_date(nu["ph_entries"], chosen)
                 if not is_ok:
+                    recovery_markup = build_calendar_with_recovery(
+                        sid,
+                        datetime.strptime(chosen, "%Y-%m-%d").date(),
+                        st.get("min_date"),
+                        st.get("max_date"),
+                        "ph",
+                    )
+                    text = (
+                        f"❌ This PH date is earlier than the previous PH entry.\n\n"
+                        f"Previous PH date: {prev_date}\n"
+                        f"New PH date must be {prev_date} or later.\n\n"
+                        f"Please select a valid later date, or choose an option below."
+                    )
                     try:
-                        await q.edit_message_text(
-                            f"❌ This PH date is earlier than the previous PH entry.\n\n"
-                            f"Previous PH date: {prev_date}\n"
-                            f"New PH date must be {prev_date} or later.\n\n"
-                            f"Please select a valid later date, or choose an option below.",
-                            reply_markup=build_calendar_with_recovery(
-                                sid,
-                                datetime.strptime(prev_date, "%Y-%m-%d").date(),
-                                st.get("min_date"),
-                                st.get("max_date"),
-                                "ph",
-                            ),
-                        )
+                        await q.edit_message_text(text, reply_markup=recovery_markup)
                     except Exception:
-                        pass
+                        try:
+                            await q.edit_message_reply_markup(reply_markup=recovery_markup)
+                        except Exception:
+                            pass
                     return
 
                 idx = st["ph_idx"]
@@ -364,22 +382,26 @@ async def handle_callback(update, context):
             if st["stage"] == "special_date":
                 is_ok, prev_date = _validate_fifo_date(nu["special_entries"], chosen)
                 if not is_ok:
+                    recovery_markup = build_calendar_with_recovery(
+                        sid,
+                        datetime.strptime(chosen, "%Y-%m-%d").date(),
+                        st.get("min_date"),
+                        st.get("max_date"),
+                        "special",
+                    )
+                    text = (
+                        f"❌ This Special date is earlier than the previous Special entry.\n\n"
+                        f"Previous Special date: {prev_date}\n"
+                        f"New Special date must be {prev_date} or later.\n\n"
+                        f"Please select a valid later date, or choose an option below."
+                    )
                     try:
-                        await q.edit_message_text(
-                            f"❌ This Special date is earlier than the previous Special entry.\n\n"
-                            f"Previous Special date: {prev_date}\n"
-                            f"New Special date must be {prev_date} or later.\n\n"
-                            f"Please select a valid later date, or choose an option below.",
-                            reply_markup=build_calendar_with_recovery(
-                                sid,
-                                datetime.strptime(prev_date, "%Y-%m-%d").date(),
-                                st.get("min_date"),
-                                st.get("max_date"),
-                                "special",
-                            ),
-                        )
+                        await q.edit_message_text(text, reply_markup=recovery_markup)
                     except Exception:
-                        pass
+                        try:
+                            await q.edit_message_reply_markup(reply_markup=recovery_markup)
+                        except Exception:
+                            pass
                     return
 
                 idx = st["special_idx"]
