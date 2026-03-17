@@ -5,13 +5,13 @@ from bot.conversations import (
     apply_massadjust_payload,
     build_adjust_user_keyboard,
     build_admin_summary_text,
-    build_redo_section_keyboard,
     handle_newuser_apply,
     handle_single_apply,
 )
 from bot.ui import (
     _is_group,
     build_calendar,
+    build_calendar_with_recovery,
     cancel_keyboard,
     send_group_quiet,
     validate_application_date,
@@ -235,7 +235,16 @@ async def handle_callback(update, context):
 
         min_d = st.get("min_date")
         max_d = st.get("max_date")
-        await q.edit_message_reply_markup(reply_markup=build_calendar(sid, target, min_d, max_d))
+
+        # keep recovery buttons if user is in invalid FIFO retry path
+        if st.get("flow") == "newuser" and st.get("stage") == "ph_date":
+            reply_markup = build_calendar_with_recovery(sid, target, min_d, max_d, "ph")
+        elif st.get("flow") == "newuser" and st.get("stage") == "special_date":
+            reply_markup = build_calendar_with_recovery(sid, target, min_d, max_d, "special")
+        else:
+            reply_markup = build_calendar(sid, target, min_d, max_d)
+
+        await q.edit_message_reply_markup(reply_markup=reply_markup)
         return
 
     if kind == "manual":
@@ -321,8 +330,14 @@ async def handle_callback(update, context):
                             f"❌ This PH date is earlier than the previous PH entry.\n\n"
                             f"Previous PH date: {prev_date}\n"
                             f"New PH date must be {prev_date} or later.\n\n"
-                            f"⚠️ FIFO approach requires oldest to newest order.",
-                            reply_markup=build_redo_section_keyboard(sid, "ph"),
+                            f"Please select a valid later date, or choose an option below.",
+                            reply_markup=build_calendar_with_recovery(
+                                sid,
+                                datetime.strptime(prev_date, "%Y-%m-%d").date(),
+                                st.get("min_date"),
+                                st.get("max_date"),
+                                "ph",
+                            ),
                         )
                     except Exception:
                         pass
@@ -354,8 +369,14 @@ async def handle_callback(update, context):
                             f"❌ This Special date is earlier than the previous Special entry.\n\n"
                             f"Previous Special date: {prev_date}\n"
                             f"New Special date must be {prev_date} or later.\n\n"
-                            f"⚠️ FIFO approach requires oldest to newest order.",
-                            reply_markup=build_redo_section_keyboard(sid, "special"),
+                            f"Please select a valid later date, or choose an option below.",
+                            reply_markup=build_calendar_with_recovery(
+                                sid,
+                                datetime.strptime(prev_date, "%Y-%m-%d").date(),
+                                st.get("min_date"),
+                                st.get("max_date"),
+                                "special",
+                            ),
                         )
                     except Exception:
                         pass
