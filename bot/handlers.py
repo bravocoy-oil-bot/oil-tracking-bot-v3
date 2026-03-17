@@ -16,11 +16,7 @@ from bot.conversations import (
 )
 from constants import HELP_TEXT, START_TEXT
 from services.ledger import compute_overview, compute_user_summary, get_user_last_records
-from services.sheets_repo import (
-    get_all_rows,
-    healthcheck,
-    try_get_worksheet_title,
-)
+from services.sheets_repo import get_all_rows, healthcheck, try_get_worksheet_title
 
 SEPARATOR = "────────────────────"
 
@@ -152,49 +148,49 @@ async def cmd_summary(update, context):
         f"🔹 Available Total OIL: {s.total_balance:.1f}",
         f"🔸 Normal OIL: {s.normal_balance:.1f}",
         f"🏖 Active PH OIL: {s.ph_active:.1f}",
-        f"⌛ Expired PH OIL: {s.ph_expired:.1f}",
+        f"❌ Expired PH OIL: {s.ph_expired:.1f}",
         f"⭐ Active Special OIL: {s.special_active:.1f}",
-        f"⌛ Expired Special OIL: {s.special_expired:.1f}",
+        f"❌ Expired Special OIL: {s.special_expired:.1f}",
     ]
 
     if s.ph_active_entries:
         lines.append("")
-        lines.append("*Active PH OIL Details*")
+        lines.append("*🏖✅ Active PH OIL Details*")
         for e in s.ph_active_entries:
             lines.append(
                 f"- {e.remarks or 'PH'}: {e.qty:.1f}\n"
-                f"  📅 Date: {e.date}\n"
+                f"  📅 Clocked: {e.date}\n"
                 f"  ⏳ Expiry: {e.expiry or '—'}"
             )
 
     if s.ph_expired_entries:
         lines.append("")
-        lines.append("*Expired PH OIL Details*")
+        lines.append("*🏖❌ Expired PH OIL Details*")
         for e in s.ph_expired_entries:
             lines.append(
                 f"- {e.remarks or 'PH'}: {e.qty:.1f}\n"
-                f"  📅 Date: {e.date}\n"
-                f"  ⏳ Expiry: {e.expiry or '—'}"
+                f"  📅 Clocked: {e.date}\n"
+                f"  ❌ Expired: {e.expiry or '—'}"
             )
 
     if s.special_active_entries:
         lines.append("")
-        lines.append("*Active Special OIL Details*")
+        lines.append("*⭐✅ Active Special OIL Details*")
         for e in s.special_active_entries:
             lines.append(
                 f"- {e.remarks or 'Special'}: {e.qty:.1f}\n"
-                f"  📅 Date: {e.date}\n"
+                f"  📅 Clocked: {e.date}\n"
                 f"  ⏳ Expiry: {e.expiry or '—'}"
             )
 
     if s.special_expired_entries:
         lines.append("")
-        lines.append("*Expired Special OIL Details*")
+        lines.append("*⭐❌ Expired Special OIL Details*")
         for e in s.special_expired_entries:
             lines.append(
                 f"- {e.remarks or 'Special'}: {e.qty:.1f}\n"
-                f"  📅 Date: {e.date}\n"
-                f"  ⏳ Expiry: {e.expiry or '—'}"
+                f"  📅 Clocked: {e.date}\n"
+                f"  ❌ Expired: {e.expiry or '—'}"
             )
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
@@ -229,6 +225,16 @@ async def cmd_history(update, context):
 
 
 async def cmd_overview(update, context):
+    chat = update.effective_chat
+    if not chat or chat.type == "private":
+        await update.message.reply_text("Please use /overview inside the group.")
+        return
+
+    is_admin = await _is_admin_in_chat(context, chat.id, update.effective_user.id)
+    if not is_admin:
+        await update.message.reply_text("❌ Only group admins can use /overview.")
+        return
+
     items = compute_overview(get_all_rows)
     if not items:
         await update.message.reply_text("No records found.")
