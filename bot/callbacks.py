@@ -5,6 +5,7 @@ from bot.conversations import (
     apply_massadjust_payload,
     build_adjust_user_keyboard,
     build_admin_summary_text,
+    build_redo_section_keyboard,
     handle_newuser_apply,
     handle_single_apply,
 )
@@ -16,6 +17,20 @@ from bot.ui import (
     validate_application_date,
 )
 from services.runtime_state import pending_payloads, user_state
+
+
+def _validate_fifo_date(existing_entries: list[dict], new_date_str: str) -> tuple[bool, str]:
+    if not existing_entries:
+        return True, ""
+    prev_date_str = existing_entries[-1].get("date", "")
+    try:
+        prev_date = datetime.strptime(prev_date_str, "%Y-%m-%d").date()
+        new_date = datetime.strptime(new_date_str, "%Y-%m-%d").date()
+    except Exception:
+        return True, ""
+    if new_date < prev_date:
+        return False, prev_date_str
+    return True, ""
 
 
 async def handle_callback(update, context):
@@ -62,10 +77,50 @@ async def handle_callback(update, context):
         "adjconfirm",
         "massadjtype",
         "massadjconfirm",
+        "redo_ph",
+        "redo_special",
     ):
         if not_owner_block():
             await q.answer("This isn’t your session.", show_alert=True)
             return
+
+    if kind == "redo_ph":
+        nu = st.get("newuser", {})
+        nu["ph_entries"] = []
+        nu["ph_count"] = None
+        st["ph_idx"] = 0
+        st["stage"] = "ph_ask_count"
+        try:
+            await q.edit_message_text(
+                "🔁 PH onboarding has been reset.\n\n"
+                "Please key in PH entries again from *oldest date to newest date*.\n"
+                "That means the *earliest expiry* should be entered first.\n\n"
+                "How many PH entries do you want to add? (0–10)",
+                parse_mode="Markdown",
+                reply_markup=cancel_keyboard(sid),
+            )
+        except Exception:
+            pass
+        return
+
+    if kind == "redo_special":
+        nu = st.get("newuser", {})
+        nu["special_entries"] = []
+        nu["special_count"] = None
+        st["special_idx"] = 0
+        st["stage"] = "special_ask_count"
+        try:
+            await q.edit_message_text(
+                "🔁 Special onboarding has been reset.\n\n"
+                "Please key in Special entries again from *oldest date to newest date*.\n"
+                "That means the *earliest expiry* should be entered first.\n\n"
+                "How many Special entries do you want to add? (0–10)",
+                parse_mode="Markdown",
+                reply_markup=cancel_keyboard(sid),
+            )
+        except Exception:
+            pass
+        return
 
     if kind == "adjtype":
         oil_type = parts[2]
@@ -83,9 +138,9 @@ async def handle_callback(update, context):
 
     if kind == "adjuser":
         target_uid = parts[2]
-        from bot.conversations import _extract_unique_users  # local import to avoid circular issues
+        from bot.conversations import _extract_unique_users
 
-        users = {uid: name for uid, name in _extract_unique_users()}
+        users = {u: name for u, name in _extract_unique_users()}
         st["target_user_id"] = str(target_uid)
         st["target_name"] = users.get(str(target_uid), str(target_uid))
         st["stage"] = "awaiting_amount"
@@ -191,7 +246,20 @@ async def handle_callback(update, context):
 
         if st["flow"] == "newuser" and st["stage"] == "ph_date":
             st["stage"] = "ph_date_manual"
-            await q.edit_message_text("⌨️ Type the PH application date as YYYY-MM-DD.", reply_markup=cancel_keyboard(sid))
+            await q.edit_message_text(
+                "⌨️ Type the PH application date as YYYY-MM-DD.\n\n"
+                "⚠️ FIFO approach: date must not be earlier than the previous PH entry.",
+                reply_markup=cancel_keyboard(sid),
+            )
+            return
+
+        if st["flow"] == "newuser" and st["stage"] == "special_date":
+            st["stage"] = "special_date_manual"
+            await q.edit_message_text(
+                "⌨️ Type the Special application date as YYYY-MM-DD.\n\n"
+                "⚠️ FIFO approach: date must not be earlier than the previous Special entry.",
+                reply_markup=cancel_keyboard(sid),
+            )
             return
 
         return
@@ -237,30 +305,79 @@ async def handle_callback(update, context):
                 )
             return
 
-        if st["flow"] == "newuser" and st["stage"] == "ph_date":
+        if st["flow"] == "newuser" and st["stage"] in ("ph_date", "special_date"):
             ok, msg = validate_application_date("newuser_ph", chosen)
             if not ok:
                 await q.answer(msg, show_alert=True)
                 return
 
             nu = st["newuser"]
-            idx = st["ph_idx"]
-            nu["ph_entries"].append({"date": chosen, "reason": None})
 
-            try:
-                await q.edit_message_text(f"📅 PH Entry {idx+1}/{nu['ph_count']} — Date: {chosen}")
-            except Exception:
-                pass
+            if st["stage"] == "ph_date":
+                is_ok, prev_date = _validate_fifo_date(nu["ph_entries"], chosen)
+                if not is_ok:
+                    try:
+                        await q.edit_message_text(
+                            f"❌ This PH date is earlier than the previous PH entry.\n\n"
+                            f"Previous PH date: {prev_date}\n"
+                            f"New PH date must be {prev_date} or later.\n\n"
+                            f"⚠️ FIFO approach requires oldest to newest order.",
+                            reply_markup=build_redo_section_keyboard(sid, "ph"),
+                        )
+                    except Exception:
+                        pass
+                    return
 
-            st["stage"] = "ph_reason"
-            await send_group_quiet(
-                context,
-                q.message.chat.id,
-                f"PH Entry {idx+1}/{nu['ph_count']} — Enter *PH name*:",
-                parse_mode="Markdown",
-                reply_markup=cancel_keyboard(sid),
-            )
-            return
+                idx = st["ph_idx"]
+                nu["ph_entries"].append({"date": chosen, "reason": None})
+
+                try:
+                    await q.edit_message_text(f"📅 PH Entry {idx+1}/{nu['ph_count']} — Date: {chosen}")
+                except Exception:
+                    pass
+
+                st["stage"] = "ph_reason"
+                await send_group_quiet(
+                    context,
+                    q.message.chat.id,
+                    f"PH Entry {idx+1}/{nu['ph_count']} — Enter *PH name*:",
+                    parse_mode="Markdown",
+                    reply_markup=cancel_keyboard(sid),
+                )
+                return
+
+            if st["stage"] == "special_date":
+                is_ok, prev_date = _validate_fifo_date(nu["special_entries"], chosen)
+                if not is_ok:
+                    try:
+                        await q.edit_message_text(
+                            f"❌ This Special date is earlier than the previous Special entry.\n\n"
+                            f"Previous Special date: {prev_date}\n"
+                            f"New Special date must be {prev_date} or later.\n\n"
+                            f"⚠️ FIFO approach requires oldest to newest order.",
+                            reply_markup=build_redo_section_keyboard(sid, "special"),
+                        )
+                    except Exception:
+                        pass
+                    return
+
+                idx = st["special_idx"]
+                nu["special_entries"].append({"date": chosen, "reason": None})
+
+                try:
+                    await q.edit_message_text(f"📅 Special Entry {idx+1}/{nu['special_count']} — Date: {chosen}")
+                except Exception:
+                    pass
+
+                st["stage"] = "special_reason"
+                await send_group_quiet(
+                    context,
+                    q.message.chat.id,
+                    f"Special Entry {idx+1}/{nu['special_count']} — Enter *Special name*:",
+                    parse_mode="Markdown",
+                    reply_markup=cancel_keyboard(sid),
+                )
+                return
 
     if kind in ("approve", "deny"):
         key = parts[1] if len(parts) > 1 else ""
