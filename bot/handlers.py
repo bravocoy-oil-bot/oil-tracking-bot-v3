@@ -15,7 +15,12 @@ from bot.conversations import (
     handle_message,
 )
 from constants import HELP_TEXT, START_TEXT
-from services.ledger import compute_overview, compute_user_summary, get_user_last_records
+from services.ledger import (
+    compute_overview,
+    compute_user_summary,
+    get_user_last_records,
+    rebuild_all_balances,
+)
 from services.sheets_repo import get_all_rows, healthcheck, try_get_worksheet_title
 
 SEPARATOR = "────────────────────"
@@ -134,6 +139,48 @@ async def cmd_sheetinfo(update, context):
         await update.message.reply_text(f"Connected sheet: {title}")
     else:
         await update.message.reply_text("Sheet not ready.")
+
+
+async def cmd_rebuildbalances(update, context):
+    chat = update.effective_chat
+    if not chat or chat.type == "private":
+        await update.message.reply_text("Please use /rebuildbalances inside the group.")
+        return
+
+    is_admin = await _is_admin_in_chat(context, chat.id, update.effective_user.id)
+    if not is_admin:
+        await update.message.reply_text("❌ Only group admins can use /rebuildbalances.")
+        return
+
+    try:
+        rebuilt = rebuild_all_balances(get_all_rows)
+    except Exception as exc:
+        await update.message.reply_text(f"❌ Rebuild failed: {exc}")
+        return
+
+    if not rebuilt:
+        await update.message.reply_text("⚠️ Rebuild completed, but no users were found in ledger.")
+        return
+
+    negative_users = [s.user_name for s in rebuilt if s.normal_balance < 0]
+
+    lines = [
+        "✅ *Balances rebuilt from ledger*",
+        "",
+        f"👥 Users rebuilt: {len(rebuilt)}",
+    ]
+
+    if negative_users:
+        preview = ", ".join(negative_users[:10])
+        if len(negative_users) > 10:
+            preview += ", ..."
+        lines.extend([
+            "",
+            f"⚠️ Users with negative normal balance: {len(negative_users)}",
+            preview,
+        ])
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_summary(update, context):
@@ -311,6 +358,7 @@ def register_handlers(application):
     application.add_handler(CommandHandler("ping", cmd_ping))
     application.add_handler(CommandHandler("checksheet", cmd_checksheet))
     application.add_handler(CommandHandler("sheetinfo", cmd_sheetinfo))
+    application.add_handler(CommandHandler("rebuildbalances", cmd_rebuildbalances))
 
     application.add_handler(CommandHandler("startadmin", cmd_startadmin))
     application.add_handler(CommandHandler("history", cmd_history))
