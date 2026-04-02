@@ -46,7 +46,9 @@ def _label_from_action(action: str) -> str:
     return action
 
 
-def _off_type_label(action: str, is_ph: bool = False, is_special: bool = False) -> str:
+def _off_type_label(action: str, is_ph: bool = False, is_special: bool = False, is_dos: bool = False) -> str:
+    if is_dos or action == "dos":
+        return "DOS"
     if is_special or action in ("clockspecialoff", "claimspecialoff"):
         return "Special"
     if is_ph or action in ("clockphoff", "claimphoff"):
@@ -57,10 +59,13 @@ def _off_type_label(action: str, is_ph: bool = False, is_special: bool = False) 
 def _adjust_type_flags(kind: str):
     is_ph = kind == "ph"
     is_special = kind == "special"
-    return is_ph, is_special
+    is_dos = kind == "dos"
+    return is_ph, is_special, is_dos
 
 
-def _off_type_value(is_ph: bool, is_special: bool) -> str:
+def _off_type_value(is_ph: bool, is_special: bool, is_dos: bool) -> str:
+    if is_dos:
+        return "DOS"
     if is_special:
         return "SPECIAL"
     if is_ph:
@@ -140,7 +145,7 @@ def _format_adjustoil_preview(payload: dict) -> str:
         f"- PH: {payload['projected_ph']:.1f}",
         f"- Special: {payload['projected_special']:.1f}",
         "",
-        f"📘 Ledger Row: {payload['current_total']:.1f} {operator} {abs_amount:.1f} = {payload['projected_total']:.1f}",
+        f"📘 Ledger Row: {payload['ledger_before']:.1f} {operator} {abs_amount:.1f} = {payload['ledger_after']:.1f}",
     ]
     if payload.get("expiry"):
         lines.append(f"⏳ Expiry: {payload['expiry']}")
@@ -221,15 +226,16 @@ async def apply_adjustoil_payload(context: ContextTypes.DEFAULT_TYPE, payload: d
     approver_name = payload["admin_name"]
     app_date = payload["application_date"]
     remarks = payload["remarks"]
-    is_ph = payload["is_ph"]
-    is_special = payload["is_special"]
+    is_ph = payload.get("is_ph", False)
+    is_special = payload.get("is_special", False)
+    is_dos = payload.get("is_dos", False)
     expiry = payload.get("expiry", "")
 
     append_ledger_row(
         telegram_id=uid,
         name=uname,
         action_type="ADJUST",
-        off_type=_off_type_value(is_ph, is_special),
+        off_type=_off_type_value(is_ph, is_special, is_dos),
         amount=amount,
         application_date=app_date,
         expiry_date=expiry if amount > 0 and (is_ph or is_special) else "",
@@ -463,7 +469,10 @@ async def cmd_adjustoil(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [
             InlineKeyboardButton("Normal", callback_data=f"adjtype|{sid}|normal"),
             InlineKeyboardButton("PH", callback_data=f"adjtype|{sid}|ph"),
+        ],
+        [
             InlineKeyboardButton("Special", callback_data=f"adjtype|{sid}|special"),
+            InlineKeyboardButton("DOS", callback_data=f"adjtype|{sid}|dos"),
         ],
         [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel|{sid}")],
     ])
@@ -659,12 +668,14 @@ async def finalize_single_request(update: Update, context: ContextTypes.DEFAULT_
         f"- Normal: {current_normal:.1f}",
         f"- PH: {current_ph:.1f}",
         f"- Special: {current_special:.1f}",
+        f"- DOS Points: {payload['current_dos']:.1f}",
         "",
         "*Balances After*",
         f"- Total: {(projected_normal + projected_ph + projected_special):.1f}",
         f"- Normal: {projected_normal:.1f}",
         f"- PH: {projected_ph:.1f}",
         f"- Special: {projected_special:.1f}",
+        f"- DOS Points: {payload['projected_dos']:.1f}",
     ]
 
     if expiry:
@@ -968,17 +979,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_uid = st["target_user_id"]
         target_name = st["target_name"]
         oil_type = st["oil_type"]
-        is_ph, is_special = _adjust_type_flags(oil_type)
+        is_ph, is_special, is_dos = _adjust_type_flags(oil_type)
 
         summary = compute_user_summary(str(target_uid), get_all_rows)
         current_total = summary.total_balance
         current_normal = summary.normal_balance
         current_ph = summary.ph_active
         current_special = summary.special_active
+        current_dos = summary.dos_points
 
         projected_normal = current_normal
         projected_ph = current_ph
         projected_special = current_special
+        projected_dos = current_dos
 
         if oil_type == "normal":
             projected_normal += amount
@@ -986,6 +999,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             projected_ph += amount
         elif oil_type == "special":
             projected_special += amount
+        elif oil_type == "dos":
+            projected_dos += amount
 
         if oil_type == "ph" and projected_ph < 0:
             await reply_quiet(
@@ -1002,6 +1017,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=cancel_keyboard(st["sid"]),
             )
             return
+        
+        if oil_type == "dos":
+            if amount != int(amount):
+                await reply_quiet(
+                    update,
+                    "❌ DOS must use whole-number points only. Examples: 1, 2, 3, -1",
+                    reply_markup=cancel_keyboard(st["sid"]),
+                )
+                return
+            if projected_dos < 0:
+                await reply_quiet(
+                    update,
+                    f"❌ DOS points cannot go below 0.\nCurrent DOS: {current_dos:.1f}\nRequested adjustment: {amount:+.1f}",
+                    reply_markup=cancel_keyboard(st["sid"]),
+                )
+                return
 
         app_date = sg_today().strftime("%Y-%m-%d")
         expiry = ""
@@ -1022,6 +1053,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         st["projected_special"] = projected_special
         st["expiry"] = expiry
         st["stage"] = "awaiting_reason"
+        st["is_dos"] = is_dos
+        st["current_dos"] = current_dos
+        st["projected_dos"] = projected_dos
+        st["projected_total"] = projected_normal + projected_ph + projected_special
+        st["ledger_before"] = current_dos if oil_type == "dos" else current_total
+        st["ledger_after"] = projected_dos if oil_type == "dos" else (projected_normal + projected_ph + projected_special)
 
         await reply_quiet(
             update,
@@ -1059,6 +1096,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "projected_ph": st["projected_ph"],
             "projected_special": st["projected_special"],
             "expiry": st.get("expiry", ""),
+            "is_dos": st["is_dos"],
+            "current_dos": st["current_dos"],
+            "projected_dos": st["projected_dos"],
+            "ledger_before": st["ledger_before"],
+            "ledger_after": st["ledger_after"],
         }
 
         st["payload"] = payload

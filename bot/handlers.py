@@ -36,11 +36,13 @@ async def _is_admin_in_chat(context, chat_id: int, user_id: int) -> bool:
 
 
 def _off_type(row) -> str:
-    kind = (row.holiday_kind or "").strip().lower()
-    if kind == "special":
+    off_type = (row.off_type or "").strip().upper()
+    if off_type == "SPECIAL":
         return "Special"
-    if kind in ("yes", "y", "true", "1"):
+    if off_type == "PH":
         return "PH"
+    if off_type == "DOS":
+        return "DOS"
     return "Normal"
 
 
@@ -53,6 +55,7 @@ def _build_user_detail_block(summary, recent_rows) -> str:
         f"   ❌ Expired PH: {summary.ph_expired:.1f}",
         f"   ⭐ Active Special: {summary.special_active:.1f}",
         f"   ❌ Expired Special: {summary.special_expired:.1f}",
+        f"   🪖 DOS Points: {summary.dos_points:.1f}",
     ]
 
     if summary.normal_balance < 0:
@@ -242,6 +245,7 @@ async def cmd_summary(update, context):
         f"❌ Expired PH OIL: {s.ph_expired:.1f}",
         f"⭐ Active Special OIL: {s.special_active:.1f}",
         f"❌ Expired Special OIL: {s.special_expired:.1f}",
+        f"🟠 DOS Points: {s.dos_points:.1f}",
     ]
 
     if s.ph_active_entries:
