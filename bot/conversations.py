@@ -63,7 +63,7 @@ def _adjust_type_flags(kind: str):
     return is_ph, is_special, is_dos
 
 
-def _off_type_value(is_ph: bool, is_special: bool, is_dos: bool) -> str:
+def _off_type_value(is_ph: bool, is_special: bool, is_dos: bool = False) -> str:
     if is_dos:
         return "DOS"
     if is_special:
@@ -293,11 +293,38 @@ def build_admin_summary_text(payload: dict, approved: bool, approver_name: str, 
     status = "✅ Approved" if approved else "❌ Denied"
 
     if payload["type"] == "single":
+        is_dos = payload.get("is_dos", False)
+
         off_type = _off_type_label(
             payload.get("action", ""),
             payload.get("is_ph", False),
             payload.get("is_special", False),
+            is_dos,
         )
+
+        if is_dos:
+            lines = [
+                status,
+                f"Clock DOS [{off_type}] — {payload['user_name']} ({payload['user_id']})",
+                f"Points: {payload.get('dos_points', 0.0):.1f} | Type: {payload.get('dos_kind', 'DOS')} | Date: {payload['app_date']}",
+                f"Reason: {payload.get('reason', '') or '—'}",
+                "",
+                "Balances Before",
+                f"- Total: {payload.get('current_total', 0.0):.1f}",
+                f"- Normal: {payload.get('current_normal', 0.0):.1f}",
+                f"- PH: {payload.get('current_ph', 0.0):.1f}",
+                f"- Special: {payload.get('current_special', 0.0):.1f}",
+                f"- DOS Points: {payload.get('current_dos', 0.0):.1f}",
+                "",
+                "Balances After",
+                f"- Total: {payload.get('projected_total', 0.0):.1f}",
+                f"- Normal: {payload.get('projected_normal', 0.0):.1f}",
+                f"- PH: {payload.get('projected_ph', 0.0):.1f}",
+                f"- Special: {payload.get('projected_special', 0.0):.1f}",
+                f"- DOS Points: {payload.get('projected_dos', 0.0):.1f}",
+                f"Approved by: {approver_name}",
+            ]
+            return "\n".join(lines)
 
         lines = [
             status,
@@ -310,12 +337,14 @@ def build_admin_summary_text(payload: dict, approved: bool, approver_name: str, 
             f"- Normal: {payload.get('current_normal', 0.0):.1f}",
             f"- PH: {payload.get('current_ph', 0.0):.1f}",
             f"- Special: {payload.get('current_special', 0.0):.1f}",
+            f"- DOS Points: {payload.get('current_dos', 0.0):.1f}",
             "",
             "Balances After",
             f"- Total: {payload.get('projected_total', 0.0):.1f}",
             f"- Normal: {payload.get('projected_normal', 0.0):.1f}",
             f"- PH: {payload.get('projected_ph', 0.0):.1f}",
             f"- Special: {payload.get('projected_special', 0.0):.1f}",
+            f"- DOS Points: {payload.get('projected_dos', 0.0):.1f}",
         ]
 
         if (payload.get("is_ph") or payload.get("is_special")) and payload.get("expiry"):
@@ -444,6 +473,39 @@ async def cmd_claimspecialoff(update: Update, context: ContextTypes.DEFAULT_TYPE
     await start_flow_days(update, context, "special", "claimspecialoff", False)
 
 
+async def cmd_clockdos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    sid = str(uuid4())[:10]
+
+    user_state[uid] = {
+        "sid": sid,
+        "flow": "dos",
+        "action": "clockdos",
+        "stage": "awaiting_app_date",
+        "group_id": update.effective_chat.id if update.effective_chat else None,
+        "owner_id": uid,
+        "is_ph": False,
+        "is_dos": True,
+        "min_date": sg_today() - timedelta(days=365),
+        "max_date": sg_today(),
+    }
+
+    summary = compute_user_summary(str(uid), get_all_rows)
+
+    await reply_quiet(
+        update,
+        f"🪖 Your current DOS Points: {summary.dos_points:.1f}\n\n"
+        f"Select the DOS date.\n"
+        f"The bot will auto-detect whether it is Weekday / Weekend / Public Holiday.",
+        reply_markup=build_calendar(
+            sid,
+            sg_today(),
+            sg_today() - timedelta(days=365),
+            sg_today(),
+        ),
+    )
+
+
 async def cmd_adjustoil(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if not chat or chat.type == "private":
@@ -561,34 +623,44 @@ async def finalize_single_request(update: Update, context: ContextTypes.DEFAULT_
     user = update.effective_user
     group_id = st.get("group_id") or (update.effective_chat.id if update.effective_chat else None)
 
-    days = float(st["days"])
+    action = st["action"]
     is_ph = st["is_ph"]
-    is_special = st["action"] in ("clockspecialoff", "claimspecialoff")
+    is_special = action in ("clockspecialoff", "claimspecialoff")
+    is_dos = action == "clockdos"
 
     summary = compute_user_summary(str(uid), get_all_rows)
     current_normal = summary.normal_balance
     current_ph = summary.ph_active
     current_special = summary.special_active
     current_total = summary.total_balance
+    current_dos = summary.dos_points
 
     projected_normal = current_normal
     projected_ph = current_ph
     projected_special = current_special
+    projected_dos = current_dos
 
-    if st["action"] == "claimoff":
+    days = float(st.get("days", 0.0))
+    dos_points = 0
+    dos_kind = ""
+
+    if action == "claimoff":
         projected_normal = current_normal - days
-    elif st["action"] == "claimphoff":
+    elif action == "claimphoff":
         projected_ph = current_ph - days
-    elif st["action"] == "claimspecialoff":
+    elif action == "claimspecialoff":
         projected_special = current_special - days
-    elif st["action"] == "clockoff":
+    elif action == "clockoff":
         projected_normal = current_normal + days
-    elif st["action"] == "clockphoff":
+    elif action == "clockphoff":
         projected_ph = current_ph + days
-    elif st["action"] == "clockspecialoff":
+    elif action == "clockspecialoff":
         projected_special = current_special + days
+    elif action == "clockdos":
+        dos_kind, dos_points = _dos_kind_and_points(app_date)
+        projected_dos = current_dos + float(dos_points)
 
-    if st["action"] == "claimphoff" and days > current_ph:
+    if action == "claimphoff" and days > current_ph:
         await reply_quiet(
             update,
             f"❌ You only have {current_ph:.1f} active PH OIL available.\n"
@@ -596,7 +668,7 @@ async def finalize_single_request(update: Update, context: ContextTypes.DEFAULT_
         )
         return
 
-    if st["action"] == "claimspecialoff" and days > current_special:
+    if action == "claimspecialoff" and days > current_special:
         await reply_quiet(
             update,
             f"❌ You only have {current_special:.1f} active Special OIL available.\n"
@@ -604,13 +676,13 @@ async def finalize_single_request(update: Update, context: ContextTypes.DEFAULT_
         )
         return
 
-    ok, msg = validate_application_date(st["action"], app_date)
+    ok, msg = validate_application_date(action, app_date)
     if not ok:
         await reply_quiet(update, msg)
         return
 
     expiry = ""
-    if (st["action"] == "clockphoff") or (st["action"] == "clockspecialoff"):
+    if action in ("clockphoff", "clockspecialoff"):
         try:
             d = datetime.strptime(app_date, "%Y-%m-%d").date()
             expiry = (d + timedelta(days=365)).strftime("%Y-%m-%d")
@@ -623,22 +695,27 @@ async def finalize_single_request(update: Update, context: ContextTypes.DEFAULT_
         "user_id": str(uid),
         "user_name": user.full_name,
         "group_id": group_id,
-        "action": st["action"],
+        "action": action,
         "days": days,
+        "dos_points": dos_points,
+        "dos_kind": dos_kind,
         "reason": st.get("reason", ""),
         "app_date": app_date,
         "is_ph": is_ph,
         "is_special": is_special,
+        "is_dos": is_dos,
         "expiry": expiry,
         "admin_msgs": [],
         "current_total": current_total,
         "current_normal": current_normal,
         "current_ph": current_ph,
         "current_special": current_special,
+        "current_dos": current_dos,
         "projected_total": projected_normal + projected_ph + projected_special,
         "projected_normal": projected_normal,
         "projected_ph": projected_ph,
         "projected_special": projected_special,
+        "projected_dos": projected_dos,
         "warn_negative_normal": projected_normal < 0,
     }
 
@@ -652,14 +729,24 @@ async def finalize_single_request(update: Update, context: ContextTypes.DEFAULT_
         InlineKeyboardButton("❌ Deny", callback_data=f"deny|{key}"),
     ]])
 
-    off_type = _off_type_label(st["action"], is_ph, is_special)
-    display_action = _label_from_action(st["action"])
+    off_type = _off_type_label(action, is_ph, is_special, is_dos)
+    display_action = "Clock DOS" if is_dos else _label_from_action(action)
 
     text_lines = [
         f"🆕 *{display_action} Request [{off_type}]*",
         "",
         f"👤 User: {user.full_name} ({uid})",
-        f"📅 Days: {days:.1f}",
+    ]
+
+    if is_dos:
+        text_lines.extend([
+            f"🪖 DOS Type: {dos_kind}",
+            f"📌 Points: {dos_points:.1f}",
+        ])
+    else:
+        text_lines.append(f"📅 Days: {days:.1f}")
+
+    text_lines.extend([
         f"🗓 Application Date: {app_date}",
         f"📝 Reason: {st.get('reason', '') or '—'}",
         "",
@@ -668,15 +755,15 @@ async def finalize_single_request(update: Update, context: ContextTypes.DEFAULT_
         f"- Normal: {current_normal:.1f}",
         f"- PH: {current_ph:.1f}",
         f"- Special: {current_special:.1f}",
-        f"- DOS Points: {payload['current_dos']:.1f}",
+        f"- DOS Points: {current_dos:.1f}",
         "",
         "*Balances After*",
         f"- Total: {(projected_normal + projected_ph + projected_special):.1f}",
         f"- Normal: {projected_normal:.1f}",
         f"- PH: {projected_ph:.1f}",
         f"- Special: {projected_special:.1f}",
-        f"- DOS Points: {payload['projected_dos']:.1f}",
-    ]
+        f"- DOS Points: {projected_dos:.1f}",
+    ])
 
     if expiry:
         if is_ph:
@@ -684,7 +771,7 @@ async def finalize_single_request(update: Update, context: ContextTypes.DEFAULT_
         if is_special:
             text_lines.append(f"⭐ Special Expiry: {expiry}")
 
-    if projected_normal < 0 and st["action"] == "claimoff":
+    if projected_normal < 0 and action == "claimoff":
         text_lines.extend([
             "",
             "⚠️ *Warning*",
@@ -806,26 +893,39 @@ async def handle_single_apply(update: Update, context: ContextTypes.DEFAULT_TYPE
     uid = payload["user_id"]
     uname = payload["user_name"]
     action = payload["action"]
-    days = float(payload["days"])
-    app_date = payload["app_date"]
     reason = payload.get("reason", "")
-    is_ph = bool(payload.get("is_ph"))
-    is_special = bool(payload.get("is_special"))
-    expiry = payload.get("expiry", "")
+    is_dos = bool(payload.get("is_dos"))
 
-    append_ledger_row(
-        telegram_id=uid,
-        name=uname,
-        action_type=_request_action_type(action),
-        off_type=_off_type_value(is_ph, is_special),
-        amount=(-days if "claim" in action else days),
-        application_date=app_date,
-        expiry_date=(expiry if "clock" in action and (is_ph or is_special) else ""),
-        remarks=reason,
-        approved_by=approver_name,
-        source="USER",
-    )
-    rebuild_user_balance(uid, get_all_rows)
+    if is_dos:
+        award_dos_for_date(
+            telegram_id=uid,
+            name=uname,
+            work_date=payload["app_date"],
+            approved_by=approver_name,
+            source="USER",
+            remarks=reason,
+            get_all_rows_fn=get_all_rows,
+        )
+    else:
+        days = float(payload["days"])
+        app_date = payload["app_date"]
+        is_ph = bool(payload.get("is_ph"))
+        is_special = bool(payload.get("is_special"))
+        expiry = payload.get("expiry", "")
+
+        append_ledger_row(
+            telegram_id=uid,
+            name=uname,
+            action_type=_request_action_type(action),
+            off_type=_off_type_value(is_ph, is_special),
+            amount=(-days if "claim" in action else days),
+            application_date=app_date,
+            expiry_date=(expiry if "clock" in action and (is_ph or is_special) else ""),
+            remarks=reason,
+            approved_by=approver_name,
+            source="USER",
+        )
+        rebuild_user_balance(uid, get_all_rows)
 
     await send_group_quiet(context, gid, f"✅ Request for {uname} approved by {approver_name}.")
     summary = build_admin_summary_text(payload, approved=True, approver_name=approver_name, final_off=None)
@@ -1207,10 +1307,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if st["flow"] in ("normal", "ph", "special") and st["stage"] == "awaiting_reason":
+    if st["flow"] in ("normal", "ph", "special", "dos") and st["stage"] == "awaiting_reason":
         txt = text.strip()
         action = st.get("action", "")
-        optional = action in ("claimoff", "claimphoff", "claimspecialoff")
+        optional = action in ("claimoff", "claimphoff", "claimspecialoff", "clockdos")
+
         if optional:
             st["reason"] = "—" if txt.lower() == "nil" or txt == "" else txt[:80]
         else:

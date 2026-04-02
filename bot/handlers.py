@@ -9,6 +9,7 @@ from bot.conversations import (
     cmd_clockoff,
     cmd_clockphoff,
     cmd_clockspecialoff,
+    cmd_clockdos,
     cmd_massadjustoff,
     cmd_newuser,
     cmd_startadmin,
@@ -245,7 +246,7 @@ async def cmd_summary(update, context):
         f"❌ Expired PH OIL: {s.ph_expired:.1f}",
         f"⭐ Active Special OIL: {s.special_active:.1f}",
         f"❌ Expired Special OIL: {s.special_expired:.1f}",
-        f"🟠 DOS Points: {s.dos_points:.1f}",
+        f"🪖 DOS Points: {s.dos_points:.1f}",
     ]
 
     if s.ph_active_entries:
@@ -342,7 +343,8 @@ async def cmd_overview(update, context):
             f"   🔹 Total: {s.total_balance:.1f}\n"
             f"   🔸 Normal: {s.normal_balance:.1f}\n"
             f"   🏖 PH: {s.ph_active:.1f}\n"
-            f"   ⭐ Special: {s.special_active:.1f}"
+            f"   ⭐ Special: {s.special_active:.1f}\n"
+            f"   🪖 DOS Points: {s.dos_points:.1f}"
             + (f"\n   ⚠️ Negative normal balance" if s.normal_balance < 0 else "")
         )
 
