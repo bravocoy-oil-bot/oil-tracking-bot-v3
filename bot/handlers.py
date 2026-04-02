@@ -6,10 +6,10 @@ from bot.conversations import (
     cmd_claimoff,
     cmd_claimphoff,
     cmd_claimspecialoff,
+    cmd_clockdos,
     cmd_clockoff,
     cmd_clockphoff,
     cmd_clockspecialoff,
-    cmd_clockdos,
     cmd_massadjustoff,
     cmd_newuser,
     cmd_startadmin,
@@ -420,6 +420,7 @@ def register_handlers(application):
     application.add_handler(CommandHandler("claimphoff", cmd_claimphoff))
     application.add_handler(CommandHandler("clockspecialoff", cmd_clockspecialoff))
     application.add_handler(CommandHandler("claimspecialoff", cmd_claimspecialoff))
+    application.add_handler(CommandHandler("clockdos", cmd_clockdos))
     application.add_handler(CommandHandler("newuser", cmd_newuser))
     application.add_handler(CommandHandler("adjustoil", cmd_adjustoil))
     application.add_handler(CommandHandler("massadjustoff", cmd_massadjustoff))
