@@ -451,7 +451,7 @@ def get_user_last_records(
     events = [e for e in _parse_ledger_events(get_all_rows_fn) if e.user_id == str(user_id)]
     if not events:
         return []
-    _, _, _, history_rows = _build_user_state(events)
+    _, _, _, _, history_rows = _build_user_state(events)
     return history_rows[-limit:]
 
 def award_dos_for_date(
