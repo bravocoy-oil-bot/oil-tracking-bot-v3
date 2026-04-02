@@ -17,7 +17,15 @@ from bot.ui import (
     validate_application_date,
     validate_half_step,
 )
-from services.ledger import compute_user_summary, rebuild_user_balance
+
+from services.ledger import (
+    award_dos_for_date,
+    compute_user_summary,
+    dos_points_for_date,
+    is_sg_public_holiday,
+    rebuild_user_balance,
+)
+
 from services.runtime_state import pending_payloads, user_state
 from services.sheets_repo import (
     append_ledger_row,
@@ -80,6 +88,13 @@ def _request_action_type(action: str) -> str:
 def _extract_unique_users():
     return list_all_known_users()
 
+def _dos_kind_and_points(app_date: str) -> tuple[str, int]:
+    d = datetime.strptime(app_date, "%Y-%m-%d").date()
+    if is_sg_public_holiday(d):
+        return "Holiday DOS", 3
+    if d.weekday() >= 5:
+        return "Weekend DOS", 2
+    return "Weekday DOS", 1
 
 def build_adjust_user_keyboard(session_id: str) -> InlineKeyboardMarkup:
     users = _extract_unique_users()
@@ -495,8 +510,7 @@ async def cmd_clockdos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await reply_quiet(
         update,
         f"🪖 Your current DOS Points: {summary.dos_points:.1f}\n\n"
-        f"Select the DOS date.\n"
-        f"The bot will auto-detect whether it is Weekday / Weekend / Public Holiday.",
+        f"Select the DOS date:",
         reply_markup=build_calendar(
             sid,
             sg_today(),
