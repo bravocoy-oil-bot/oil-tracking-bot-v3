@@ -26,6 +26,7 @@ from services.ledger import (
 from services.sheets_repo import get_all_rows, healthcheck, try_get_worksheet_title
 
 SEPARATOR = "────────────────────"
+MAX_MESSAGE_LEN = 3800
 
 
 async def _is_admin_in_chat(context, chat_id: int, user_id: int) -> bool:
@@ -35,6 +36,54 @@ async def _is_admin_in_chat(context, chat_id: int, user_id: int) -> bool:
     except Exception:
         return False
 
+
+
+
+def _split_message_by_lines(text: str, max_len: int = MAX_MESSAGE_LEN) -> list[str]:
+    parts = []
+    current = ""
+
+    for line in text.splitlines(True):
+        if len(current) + len(line) <= max_len:
+            current += line
+            continue
+
+        if current.strip():
+            parts.append(current.strip())
+            current = ""
+
+        if len(line) <= max_len:
+            current = line
+            continue
+
+        start = 0
+        while start < len(line):
+            piece = line[start:start + max_len]
+            if piece.strip():
+                parts.append(piece.strip())
+            start += max_len
+
+    if current.strip():
+        parts.append(current.strip())
+
+    return parts
+
+
+def _append_block_to_chunks(chunks: list[str], block: str, max_len: int = MAX_MESSAGE_LEN) -> list[str]:
+    if not chunks:
+        chunks.append("")
+
+    if len(chunks[-1]) + len(block) <= max_len:
+        chunks[-1] += block
+        return chunks
+
+    for piece in _split_message_by_lines(block.lstrip(), max_len=max_len):
+        if len(chunks[-1]) + len(piece) + 1 <= max_len and chunks[-1].strip():
+            chunks[-1] += "\n" + piece
+        else:
+            chunks.append(piece)
+
+    return chunks
 
 def _off_type(row) -> str:
     off_type = (row.off_type or "").strip().upper()
@@ -382,8 +431,7 @@ async def cmd_detailedoverview(update, context):
         await update.message.reply_text("No records found.")
         return
 
-    header = "📋 *Detailed Sector OIL Overview*"
-    chunk = header
+    chunks = ["📋 Detailed Sector OIL Overview"]
 
     for idx, s in enumerate(items, start=1):
         recent = get_user_last_records(s.user_id, get_all_rows, limit=3)
@@ -392,14 +440,11 @@ async def cmd_detailedoverview(update, context):
         if idx > 1:
             block = f"\n\n{SEPARATOR}\n" + block
 
-        if len(chunk) + len(block) > 3800:
-            await update.message.reply_text(chunk.strip(), parse_mode="Markdown")
-            chunk = block.lstrip()
-        else:
-            chunk += block
+        _append_block_to_chunks(chunks, block, max_len=MAX_MESSAGE_LEN)
 
-    if chunk.strip():
-        await update.message.reply_text(chunk.strip(), parse_mode="Markdown")
+    for chunk in chunks:
+        if chunk.strip():
+            await update.message.reply_text(chunk.strip())
 
 
 def register_handlers(application):
