@@ -415,6 +415,8 @@ async def cmd_overview(update, context):
         await update.message.reply_text(chunk.strip(), parse_mode="Markdown")
 
 
+MAX_MESSAGE_LEN = 3500
+
 async def cmd_detailedoverview(update, context):
     chat = update.effective_chat
     if not chat or chat.type == "private":
@@ -431,21 +433,80 @@ async def cmd_detailedoverview(update, context):
         await update.message.reply_text("No records found.")
         return
 
-    chunks = ["📋 Detailed Sector OIL Overview"]
+    header = "📋 Detailed Sector OIL Overview"
+    batch = []
+    batch_len = len(header)
+    users_in_batch = 0
 
     for idx, s in enumerate(items, start=1):
-        recent = get_user_last_records(s.user_id, get_all_rows, limit=3)
-        block = f"\n\n{idx}) " + _build_user_detail_block(s, recent)
+        try:
+            recent = get_user_last_records(s.user_id, get_all_rows, limit=3)
+        except Exception as e:
+            print(f"get_user_last_records failed for {s.user_id}: {e}")
+            recent = []
 
-        if idx > 1:
-            block = f"\n\n{SEPARATOR}\n" + block
+        block = f"{idx}) " + _build_user_detail_block(s, recent)
 
-        _append_block_to_chunks(chunks, block, max_len=MAX_MESSAGE_LEN)
+        if users_in_batch > 0:
+            block = f"\n\n{SEPARATOR}\n{block}"
 
-    for chunk in chunks:
-        if chunk.strip():
-            await update.message.reply_text(chunk.strip())
+        projected_len = batch_len + len(block) + 2
 
+        # send current batch if next block would exceed either limit
+        if batch and (users_in_batch >= 4 or projected_len > MAX_MESSAGE_LEN):
+            await update.message.reply_text(header + "\n\n" + "".join(batch))
+            batch = []
+            batch_len = len(header)
+            users_in_batch = 0
+            block = f"{idx}) " + _build_user_detail_block(s, recent)
+
+        # if one single user block is too large, split it
+        if len(header) + 2 + len(block) > MAX_MESSAGE_LEN:
+            if batch:
+                await update.message.reply_text(header + "\n\n" + "".join(batch))
+                batch = []
+                batch_len = len(header)
+                users_in_batch = 0
+
+            parts = _split_long_text(block, MAX_MESSAGE_LEN - len(header) - 2)
+            for i, part in enumerate(parts):
+                if i == 0:
+                    await update.message.reply_text(header + "\n\n" + part)
+                else:
+                    await update.message.reply_text(part)
+            continue
+
+        batch.append(block)
+        batch_len += len(block)
+        users_in_batch += 1
+
+    if batch:
+        await update.message.reply_text(header + "\n\n" + "".join(batch))
+
+def _split_long_text(text: str, max_len: int):
+    parts = []
+    current = ""
+
+    for line in text.splitlines(True):
+        if len(current) + len(line) <= max_len:
+            current += line
+        else:
+            if current:
+                parts.append(current.strip())
+                current = ""
+
+            if len(line) <= max_len:
+                current = line
+            else:
+                start = 0
+                while start < len(line):
+                    parts.append(line[start:start + max_len].strip())
+                    start += max_len
+
+    if current.strip():
+        parts.append(current.strip())
+
+    return parts
 
 def register_handlers(application):
     application.add_handler(CommandHandler("start", cmd_start))
