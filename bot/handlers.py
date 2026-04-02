@@ -366,7 +366,7 @@ async def cmd_history(update, context):
             f"   📝 {r.remarks or '—'}"
         )
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_overview(update, context):
